@@ -15,9 +15,8 @@
 # limitations under the License.
 #
 
-# 统一环境变量配置 - 所有服务继承
-x-common-env: &common-env
-  TZ: ${TZ:-Asia/Shanghai}
+# 统一环境变量配置
+x-tz: &tz TZ=Asia/Shanghai
 
 x-build-base: &build-base
   build:
@@ -27,7 +26,6 @@ x-build-base: &build-base
 
 services:
   qwen2.5-vl:
-    <<: *common-env
     image: nvcr.io/nvidia/tensorrt-llm/release:spark-single-gpu-dev
     container_name: qwen2.5-vl
     shm_size: '1g'
@@ -40,6 +38,7 @@ services:
               count: all
               capabilities: [gpu]
     environment:
+      - *tz
       - TOKENIZERS_PARALLELISM=false
       - NCCL_P2P_LEVEL=SYS
       - NCCL_DEBUG=INFO
@@ -60,7 +59,6 @@ services:
       start_period: 60s
 
   qwen3-embedding:
-    <<: *common-env
     <<: *build-base
     container_name: qwen3-embedding
     volumes:
@@ -72,6 +70,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - *tz
     command:
       - "-m"
       - "/models/Qwen3-Embedding-4B-Q8_0.gguf"
@@ -110,7 +110,6 @@ services:
 
   # Comment next block if you want to use gpt-oss-20b
   gpt-oss-120b:
-    <<: *common-env
     <<: *build-base
     container_name: gpt-oss-120b
     volumes:
@@ -122,6 +121,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - *tz
     command:
       - "-m"
       - "/models/gpt-oss-120b-mxfp4-00001-of-00003.gguf"
@@ -138,7 +139,6 @@ services:
       - "--jinja"
 
   deepseek-coder:
-    <<: *common-env
     <<: *build-base
     container_name: deepseek-coder
     volumes:
@@ -150,6 +150,8 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      - *tz
     command:
       - "-m"
       - "/models/deepseek-coder-6.7b-instruct.Q8_0.gguf"
