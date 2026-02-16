@@ -14,8 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+# 统一环境变量配置 - 所有服务继承
+x-common-env: &common-env
+  TZ: ${TZ:-Asia/Shanghai}
+
 services:
   backend:
+    <<: *common-env
     container_name: backend
     build:
       context: ./backend
@@ -45,6 +51,7 @@ services:
       - MODELS=gpt-oss-120b #,gpt-oss-20b
 
   frontend:
+    <<: *common-env
     container_name: frontend
     build:
       context: ./frontend
@@ -65,6 +72,7 @@ services:
 
 
   postgres:
+    <<: *common-env
     container_name: postgres
     image: postgres:15-alpine
     ports:
@@ -88,6 +96,7 @@ services:
         max-file: "3"
 
   etcd:
+    <<: *common-env
     container_name: milvus-etcd
     image: quay.io/coreos/etcd:v3.5.5
     environment:
@@ -111,6 +120,7 @@ services:
         max-file: "3"
 
   minio:
+    <<: *common-env
     container_name: milvus-minio
     image: minio/minio:RELEASE.2023-03-20T20-16-18Z
     environment:
@@ -132,6 +142,7 @@ services:
         max-file: "3"
 
   milvus:
+    <<: *common-env
     container_name: milvus-standalone
     image: milvusdb/milvus:v2.5.15-20250718-3a3b374f-gpu-arm64
     command: ["milvus", "run", "standalone"]
