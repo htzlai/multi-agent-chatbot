@@ -2,7 +2,9 @@
 官方文档（第 104 行）推荐的监控命令是：
 watch -n 2 'docker ps --format "table {{.Names}}\t{{.Status}}"'
 docker compose -f docker-compose.yml -f docker-compose-models.yml logs -f
+docker compose -f docker-compose-models.yml logs -f gpt-oss-120b
 docker compose -f docker-compose.yml -f docker-compose-models.yml up -d
+
 
 > Deploy a multi-agent chatbot system and chat with agents on your Spark
 
