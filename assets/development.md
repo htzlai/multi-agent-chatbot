@@ -8,13 +8,12 @@
 
 | 组件 | 技术 | 用途 |
 |------|------|------|
-| 向量数据库 | **Milvus** (v2.5.15-20250718-3a3b374f-gpu-arm64) | 存储文档嵌入向量 |
-| 嵌入模型 | **Qwen3-Embedding-4B** (Q8_0量化) | 将文本转为向量 (2560维) |
-| LLM 模型 | **gpt-oss-120B** (mxfp4量化) | 生成回答 |
+| 向量数据库 | **Milvus** (v2.5.15) | 存储文档嵌入向量 |
+| 嵌入模型 | **Qwen3-Embedding-4B** | 将文本转为向量 |
+| LLM 模型 | **gpt-oss-120B** | 生成回答 |
 | 文档处理 | LangChain + UnstructuredLoader | PDF/文档解析 |
 | 协议层 | **MCP (Model Context Protocol)** | 智能体工具调用 |
-| 对话存储 | **PostgreSQL** (15-alpine) | 聊天历史持久化 |
-| 前端框架 | **Next.js** (App Router) | 用户界面 |
+| 对话存储 | PostgreSQL | 聊天历史持久化 |
 
 ---
 
@@ -43,23 +42,17 @@ self.text_splitter = RecursiveCharacterTextSplitter(
 
 #### 2. 向量存储 (Vector Store)
 
-使用 **Milvus** 作为向量数据库，集合名称固定为 **"context"**，所有文档存储在同一个集合中，通过 `source` 元数据字段进行过滤：
+使用 **Milvus** 作为向量数据库，嵌入向量维度为 **2560**：
 
 ```python
-# vector_store.py 第101-112行
-def _initialize_store(self):
-    self._store = Milvus(
-        embedding_function=self.embeddings,
-        collection_name="context",  # 固定集合名称
-        connection_args={"uri": self.uri},
-        auto_id=True
-    )
+# vector_store.py 第102-107行
+self._store = Milvus(
+    embedding_function=self.embeddings,
+    collection_name="context",
+    connection_args={"uri": self.uri},
+    auto_id=True
+)
 ```
-
-**重要架构说明**：
-- 系统使用**单个 "context" collection** 存储所有文档
-- 每个文档块包含 `source` 元数据字段用于按知识源过滤
-- 检索时通过 Milvus 的 `filter_expr` 参数实现按 source 过滤
 
 #### 3. 检索流程 (Retrieval)
 
@@ -82,31 +75,6 @@ def retrieve(self, state: RAGState) -> Dict:
 ```
 
 #### 4. 生成回答 (Generation)
-
-RAG Agent 使用 **LangGraph** 构建工作流，实现简洁的检索-生成 pipeline：
-
-```python
-# rag.py 第193-204行
-def _build_graph(self):
-    """Build and compile the simplified RAG workflow graph."""
-    workflow = StateGraph(RAGState)
-
-    workflow.add_node("retrieve", self.retrieve)
-    workflow.add_node("generate", self.generate)
-
-    workflow.set_entry_point("retrieve")
-    workflow.add_edge("retrieve", "generate")
-    workflow.add_edge("generate", END)
-
-    return workflow.compile()
-```
-
-**LangGraph 工作流**：
-```
-START → retrieve (检索文档) → generate (生成回答) → END
-```
-
-Supervisor Agent 使用相同的 LangGraph 架构，但具有更复杂的状态机和工具调用能力。
 
 ```python
 # rag.py 第142-187行
@@ -197,27 +165,23 @@ const handleSourceToggle = async (source: string) => {
 
 #### 4. 删除知识源
 
-**⚠️ 当前实现的架构限制**：
-- 系统使用单个 "context" collection 存储所有文档
-- 当前 `/collections/{collection_name}` API 会**删除整个 collection**，这会删除所有知识源的向量
-- 这是一个需要修复的架构问题
-
-**当前可用的删除方式**：
+**方式一：删除整个 Collection**
 
 ```bash
-# 注意：这会删除整个 collection（所有知识源），谨慎使用！
-curl -X DELETE http://localhost:8000/collections/context
+curl -X DELETE http://localhost:8000/collections/文档名
 ```
 
-**后端实现 (`main.py` 第497-511行)**：
+后端实现 (`main.py` 第497-511行)：
 ```python
 @app.delete("/collections/{collection_name}")
 async def delete_collection(collection_name: str):
     success = vector_store.delete_collection(collection_name)
-    # 删除整个 Milvus collection
+    # 同时会触发 config.json 中 sources 的更新
 ```
 
-**推荐实现方案**：需要添加按 source 删除向量的功能（见下文 7.2 节）
+**方式二：手动删除文件**
+- 删除 `backend/uploads/` 目录下的文件
+- 手动编辑 `config.json` 移除对应条目
 
 ---
 
@@ -289,23 +253,11 @@ stream = await self.model_client.chat.completions.create(
 判断需要 RAG → 调用 search_documents 工具
     ↓
 RAG MCP Server:
-  1. retrieve: 从 Milvus 检索相关文档（按 source 过滤）
+  1. retrieve: 从 Milvus 检索相关文档
   2. generate: 用 gpt-oss-120b 生成回答
     ↓
 返回结果给 Supervisor Agent
 ```
-
-**MCP 服务器配置 (`client.py` 第39-60行)**：
-
-系统包含 4 个 MCP 服务器：
-| 服务器名称 | 文件 | 功能 |
-|-----------|------|------|
-| rag-server | `tools/mcp_servers/rag.py` | RAG 文档检索 |
-| image-understanding-server | `tools/mcp_servers/image_understanding.py` | 图像理解 |
-| code-generation-server | `tools/mcp_servers/code_generation.py` | 代码生成 |
-| weather-server | `tools/mcp_servers/weather_test.py` | 天气查询（测试用） |
-
-这些服务器通过 `MultiServerMCPClient` (langchain_mcp_adapters) 统一管理。
 
 ---
 
@@ -315,8 +267,7 @@ RAG MCP Server:
 |------|------|------|
 | `config.json` | `backend/config.json` | 知识源列表、选中源、当前模型 |
 | `docker-compose.yml` | `assets/` | 主服务配置 (Milvus, PostgreSQL, Backend, Frontend) |
-| `docker-compose-models.yml` | `assets/` | 模型服务配置 (LLM, Embedding, VLM) |
-| `next.config.ts` | `frontend/` | Next.js 代理配置，将 /api/* 转发到后端 |
+| `docker-compose-models.yml` | `assets/` | 模型服务配置 |
 
 ---
 
@@ -383,82 +334,24 @@ def _load_documents(self, file_paths: List[str] = None, input_dir: str = None) -
         docs = loader.load()
 ```
 
-#### 7.2 添加知识源删除的 UI（需先修复后端架构）
+#### 7.2 添加知识源删除的 UI
 
-**⚠️ 重要前置说明**：
-当前系统存在架构问题：使用单个 "context" collection 存储所有文档，无法按 source 删除向量。
-因此，实现删除功能需要先修复后端架构。
+需要修改以下文件来实现删除知识源功能：
 
-**推荐方案**：修改 `vector_store.py` 添加 `delete_by_source` 方法，然后修改 `main.py` 添加 `/sources/{source_name}` API。
-
-需要修改以下文件来实现完整的删除知识源功能：
-
-##### 7.2.1 后端向量删除支持 (vector_store.py)
-
-在 `vector_store.py` 中添加按 source 删除向量的方法（约第365行后）：
-
-```python
-# vector_store.py 添加新方法
-
-def delete_by_source(self, source_name: str) -> bool:
-    """Delete vectors from a specific source.
-
-    注意：Milvus 当前版本可能需要先检查集合是否有对应字段
-
-    Args:
-        source_name: Name of the source to delete vectors for
-
-    Returns:
-        bool: True if successful, False otherwise
-    """
-    try:
-        from pymilvus import connections, Collection
-
-        connections.connect(uri=self.uri)
-        collection = Collection(name="context")
-        collection.load()
-
-        # 构建过滤表达式 - 删除该 source 的所有向量
-        filter_expr = f'source == "{source_name}"'
-
-        # 删除符合条件的向量
-        collection.delete(filter_expr)
-
-        # 释放集合
-        collection.release()
-
-        logger.debug({
-            "message": "Deleted vectors by source",
-            "source": source_name
-        })
-
-        return True
-    except Exception as e:
-        logger.error({
-            "message": "Error deleting vectors by source",
-            "source": source_name,
-            "error": str(e)
-        })
-        return False
-```
-
-##### 7.2.2 后端 API (main.py)
+##### 7.2.1 后端 API (main.py)
 
 在 `main.py` 中添加删除知识源的 API（约第512行后）：
 
 ```python
 @app.delete("/sources/{source_name}")
 async def delete_source(source_name: str):
-    """Delete a knowledge source from config and vector store.
+    """Delete a knowledge source from config and optionally from vector store.
 
     Args:
         source_name: Name of the source to delete
     """
     try:
-        # 1. 从 Milvus 中删除该 source 的向量
-        vector_store.delete_by_source(source_name)
-
-        # 2. 从 config.json 的 sources 中移除
+        # 1. 从 config.json 的 sources 中移除
         config = config_manager.read_config()
 
         if source_name not in config.sources:
@@ -473,6 +366,9 @@ async def delete_source(source_name: str):
 
         config_manager.write_config(config)
 
+        # 2. 可选：从 Milvus 中删除该 source 的向量
+        # 注意：这需要修改 vector_store.py 支持按 source 删除
+
         return {
             "status": "success",
             "message": f"Source '{source_name}' deleted successfully",
@@ -482,6 +378,55 @@ async def delete_source(source_name: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting source: {str(e)}")
+```
+
+##### 7.2.2 后端向量删除支持 (vector_store.py)
+
+在 `vector_store.py` 中添加按 source 删除向量的方法（约第365行后）：
+
+```python
+def delete_by_source(self, source_name: str) -> bool:
+    """Delete vectors from a specific source.
+
+    Args:
+        source_name: Name of the source to delete vectors for
+
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    try:
+        from pymilvus import connections, Collection
+
+        connections.connect(uri=self.uri)
+        collection = Collection(name="context")
+
+        # 构建过滤表达式
+        filter_expr = f'source == "{source_name}"'
+
+        # 删除符合条件的向量
+        # 注意：这需要 Milvus 集合有 source 字段
+        # 如果没有，需要先添加字段或使用其他方式
+
+        logger.debug({
+            "message": "Deleting vectors by source",
+            "source": source_name,
+            "filter": filter_expr
+        })
+
+        # 方法1：如果有 source 字段
+        # collection.delete(filter_expr)
+
+        # 方法2：重新索引（删除整个 collection 后重新添加其他文档）
+        # 这比较复杂，建议使用软删除（标记为 deleted）
+
+        return True
+    except Exception as e:
+        logger.error({
+            "message": "Error deleting vectors by source",
+            "source": source_name,
+            "error": str(e)
+        })
+        return False
 ```
 
 ##### 7.2.3 前端组件 (Sidebar.tsx)
@@ -657,27 +602,21 @@ async def batch_select_sources(sources: List[str]):
 | 功能 | 文件 | 行号 | 描述 |
 |------|------|------|------|
 | 文本分块配置 | `vector_store.py` | 86-89 | RecursiveCharacterTextSplitter |
-| 向量存储初始化 | `vector_store.py` | 101-112 | Milvus 连接，固定 collection_name="context" |
-| 文档加载 | `vector_store.py` | 114-234 | _load_documents 方法，支持 PDF/TXT/DOCX |
+| 向量存储初始化 | `vector_store.py` | 101-112 | Milvus 连接 |
+| 文档加载 | `vector_store.py` | 114-234 | _load_documents 方法 |
 | 文档索引 | `vector_store.py` | 236-260 | index_documents 方法 |
-| 向量检索（按source过滤）| `vector_store.py` | 285-323 | get_documents 方法，使用 filter_expr |
-| 删除 Collection | `vector_store.py` | 325-365 | delete_collection 方法（删除整个集合）|
-| 按 Source 删除向量 | `vector_store.py` | 需新增 | 建议添加 delete_by_source 方法 |
+| 向量检索 | `vector_store.py` | 285-323 | get_documents 方法 |
+| 删除 Collection | `vector_store.py` | 325-365 | delete_collection 方法 |
 | RAG 检索 | `rag.py` | 117-139 | retrieve 方法 |
 | RAG 生成 | `rag.py` | 142-187 | generate 方法 |
-| RAG MCP 工具 | `rag.py` | 212-249 | @mcp.tool() search_documents |
-| 删除 Collection API | `main.py` | 497-511 | /collections/{collection_name} 端点 |
-| 删除 Source API | `main.py` | 需新增 | 建议添加 /sources/{source_name} 端点 |
+| 知识源删除 API | `main.py` | 497-511 | delete_collection 端点 |
 | 知识源配置读取 | `config.py` | 88-114 | read_config 方法 |
 | 知识源配置更新 | `config.py` | 151-154 | updated_selected_sources |
 | 聊天历史存储 | `postgres_storage.py` | 全文 | 对话持久化 |
-| MCP 客户端配置 | `client.py` | 37-60 | server_configs 定义 |
-| Agent 工具初始化 | `agent.py` | 105-144 | init_tools 方法 |
-| Agent 工具调用 | `agent.py` | 212-274 | tool_node 方法 |
-| Supervisor 系统提示 | `prompts.py` | SUPERVISOR_AGENT_STR | 智能体提示词 |
-| 前端 API 代理 | `next.config.ts` | 20-27 | rewrites 配置 /api -> backend:8000 |
 | 前端知识源选择 | `Sidebar.tsx` | 279-309 | handleSourceToggle |
-| 前端文件上传 | `DocumentIngestion.tsx` | 50-82 | handleIngestSubmit |
+| 前端文件上传 | `DocumentIngestion.tsx` | 全文 | 文档摄取 UI |
+| MCP 工具注册 | `rag.py` | 212-249 | @mcp.tool() 装饰器 |
+| Agent 工具调用 | `agent.py` | 212-274 | tool_node 方法 |
 
 ---
 
@@ -725,24 +664,12 @@ curl -X POST http://localhost:8000/selected_sources \
   -H "Content-Type: application/json" \
   -d '["文档1.pdf"]'
 
-# 测试获取选中的知识源
-curl http://localhost:8000/selected_sources
+# 测试删除知识源
+curl -X DELETE http://localhost:8000/sources/文档1.pdf
 
 # 测试文档摄取
 curl -X POST http://localhost:8000/ingest \
   -F "files=@test.pdf"
-
-# 检查摄取状态
-curl http://localhost:8000/ingest/status/{task_id}
-
-# ⚠️ 删除 Collection（会删除所有知识源，谨慎使用！）
-curl -X DELETE http://localhost:8000/collections/context
-
-# 获取可用模型
-curl http://localhost:8000/available_models
-
-# 获取聊天列表
-curl http://localhost:8000/chats
 ```
 
 ---
@@ -751,14 +678,652 @@ curl http://localhost:8000/chats
 
 | 问题 | 原因 | 解决方案 |
 |------|------|----------|
-| 上传文档后搜索不到 | 文档未完成索引或 source 未在 selected_sources 中 | 检查 `/ingest/status/{task_id}`，确认已选择知识源 |
-| 检索结果不准确 | chunk_size 不合适或 selected_sources 为空 | 调整大小或 overlap，确保已勾选知识源 |
-| 模型响应很慢 | 内存不足或模型未加载 | 检查 `nvidia-smi` 内存使用，等待模型加载完成 |
-| Milvus 连接失败 | 服务未启动或网络问题 | `docker ps` 检查 milvus-standalone 容器状态 |
-| 前端无法连接后端 | Next.js 代理未配置或后端未启动 | 检查 `next.config.ts` rewrites 配置 |
-| MCP 工具不可用 | MCP 服务器未就绪 | 查看后端日志，确认 agent 初始化完成 |
-| 删除知识源后仍可搜索 | 当前实现只删除 config，未删除向量 | 需要实现 delete_by_source 方法 |
+| 上传文档后搜索不到 | 文档未完成索引 | 检查 `/ingest/status/{task_id}` |
+| 检索结果不准确 | chunk_size 不合适 | 调整大小或 overlap |
+| 模型响应很慢 | 内存不足 | 检查 `nvidia-smi` 内存使用 |
+| Milvus 连接失败 | 服务未启动 | `docker ps` 检查 milvus 容器 |
+| 前端无法连接后端 | CORS 配置 | 检查 main.py 中的 CORS 配置 |
 
 ---
 
-需要我帮你实现某个具体功能吗？
+### 十一、前端与后端完整接口文档
+
+#### 11.1 前端代理配置
+
+前端通过 Next.js 的 `next.config.ts` 配置 API 代理：
+
+```typescript
+// frontend/next.config.ts 第20-27行
+async rewrites() {
+  return [
+    {
+      source: '/api/:path*',
+      destination: 'http://backend:8000/:path*',
+    },
+  ];
+}
+```
+
+前端请求 `/api/xxx` 会被代理到后端 `http://backend:8000/xxx`。
+
+#### 11.2 后端 API 端点总览
+
+| 序号 | 方法 | 端点 | 功能 | 所在文件 |
+|------|------|------|------|----------|
+| 1 | WebSocket | `/ws/chat/{chat_id}` | 实时聊天 | main.py:114 |
+| 2 | POST | `/upload-image` | 上传图片 | main.py:159 |
+| 3 | POST | `/ingest` | 文档摄取 | main.py:178 |
+| 4 | GET | `/ingest/status/{task_id}` | 摄取状态 | main.py:231 |
+| 5 | GET | `/sources` | 获取知识源列表 | main.py:247 |
+| 6 | GET | `/selected_sources` | 获取选中的知识源 | main.py:257 |
+| 7 | POST | `/selected_sources` | 更新选中的知识源 | main.py:267 |
+| 8 | GET | `/selected_model` | 获取当前模型 | main.py:281 |
+| 9 | POST | `/selected_model` | 更新当前模型 | main.py:291 |
+| 10 | GET | `/available_models` | 获取可用模型列表 | main.py:306 |
+| 11 | GET | `/chats` | 获取所有会话 | main.py:316 |
+| 12 | GET | `/chat_id` | 获取当前会话ID | main.py:326 |
+| 13 | POST | `/chat_id` | 更新当前会话ID | main.py:357 |
+| 14 | GET | `/chat/{chat_id}/metadata` | 获取会话元数据 | main.py:378 |
+| 15 | POST | `/chat/rename` | 重命名会话 | main.py:398 |
+| 16 | POST | `/chat/new` | 创建新会话 | main.py:418 |
+| 17 | DELETE | `/chat/{chat_id}` | 删除会话 | main.py:440 |
+| 18 | DELETE | `/chats/clear` | 清除所有会话 | main.py:467 |
+| 19 | DELETE | `/collections/{collection_name}` | 删除向量集合 | main.py:497 |
+
+#### 11.3 详细接口规范
+
+---
+
+##### 1. WebSocket 实时聊天
+
+**端点**: `WS /ws/chat/{chat_id}`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:114-157` |
+| 前端位置 | `QuerySection.tsx:237` |
+
+**连接示例**:
+```typescript
+const ws = new WebSocket(`ws://localhost:8000/ws/chat/${chatId}`);
+```
+
+**发送消息格式**:
+```json
+{
+  "message": "用户问题",
+  "image_id": "可选图片ID"
+}
+```
+
+**接收消息类型**:
+
+| type | 说明 | 数据结构 |
+|------|------|----------|
+| `history` | 聊天历史 | `{ messages: [...] }` |
+| `token` | AI 回复流 | `{ token: "文本片段" }` |
+| `tool_token` | 工具输出流 | `{ token: "工具输出" }` |
+| `tool_start` | 工具开始 | `{ data: "工具名称" }` |
+| `tool_end` | 工具结束 | `{ data: "工具名称" }` |
+| `node_start` | 节点开始 | `{ data: "节点名称" }` |
+| `node_end` | 节点结束 | `{ data: "节点名称" }` |
+| `error` | 错误信息 | `{ content: "错误消息" }` |
+
+**前端处理代码** (`QuerySection.tsx:245-303`):
+```typescript
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  const type = msg.type;
+  const text = msg.data ?? msg.token ?? "";
+
+  switch (type) {
+    case "history":
+      setResponse(JSON.stringify(msg.messages));
+      break;
+    case "token":
+      setResponse(prev => prev + text);
+      break;
+    case "tool_token":
+      setToolOutput(prev => prev + text);
+      break;
+    case "tool_start":
+      setGraphStatus(`calling tool: ${msg.data}`);
+      break;
+    case "tool_end":
+    case "node_end":
+      setGraphStatus("");
+      break;
+  }
+};
+```
+
+---
+
+##### 2. 上传图片
+
+**端点**: `POST /upload-image`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:159-176` |
+| 请求格式 | `multipart/form-data` |
+
+**请求参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `image` | File | 是 | 图片文件 |
+| `chat_id` | string | 是 | 关联的会话ID |
+
+**返回格式**:
+```json
+{
+  "image_id": "生成的UUID"
+}
+```
+
+---
+
+##### 3. 文档摄取
+
+**端点**: `POST /ingest`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:178-228` |
+| 请求格式 | `multipart/form-data` |
+
+**请求参数**:
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `files` | File[] | 是 | 要摄取的文件（支持多个） |
+
+**返回格式**:
+```json
+{
+  "message": "Files queued for processing. Indexing X files in the background.",
+  "files": ["file1.pdf", "file2.docx"],
+  "status": "queued",
+  "task_id": "uuid字符串"
+}
+```
+
+**前端调用** (`DocumentIngestion.tsx:62-65`):
+```typescript
+const formData = new FormData();
+for (let i = 0; i < files.length; i++) {
+  formData.append("files", files[i]);
+}
+const res = await fetch("/api/ingest", {
+  method: "POST",
+  body: formData,
+});
+```
+
+---
+
+##### 4. 摄取状态查询
+
+**端点**: `GET /ingest/status/{task_id}`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:231-244` |
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `task_id` | string | 摄取任务的UUID |
+
+**返回格式**:
+```json
+{
+  "status": "completed"  // queued | saving_files | loading_documents | indexing_documents | completed | failed
+}
+```
+
+---
+
+##### 5. 获取知识源列表
+
+**端点**: `GET /sources`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:247-254` |
+
+**返回格式**:
+```json
+{
+  "sources": [
+    "文档1.pdf",
+    "文档2.docx"
+  ]
+}
+```
+
+**前端调用** (`Sidebar.tsx:133`):
+```typescript
+const response = await fetch("/api/sources");
+const data = await response.json();
+setAvailableSources(data.sources || []);
+```
+
+---
+
+##### 6. 获取选中的知识源
+
+**端点**: `GET /selected_sources`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:257-264` |
+
+**返回格式**:
+```json
+{
+  "sources": ["文档1.pdf"]
+}
+```
+
+---
+
+##### 7. 更新选中的知识源
+
+**端点**: `POST /selected_sources`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:267-278` |
+
+**请求体**:
+```json
+["文档1.pdf", "文档2.pdf"]
+```
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Selected sources updated successfully"
+}
+```
+
+**前端调用** (`Sidebar.tsx:293-297`):
+```typescript
+await fetch("/api/selected_sources", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(newSelectedSources)
+});
+```
+
+---
+
+##### 8. 获取当前模型
+
+**端点**: `GET /selected_model`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:281-288` |
+
+**返回格式**:
+```json
+{
+  "model": "gpt-oss-120b"
+}
+```
+
+**前端调用** (`Sidebar.tsx:69`):
+```typescript
+const modelResponse = await fetch("/api/selected_model");
+const { model } = await modelResponse.json();
+setSelectedModel(model);
+```
+
+---
+
+##### 9. 更新当前模型
+
+**端点**: `POST /selected_model`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:291-303` |
+
+**请求体** (`models.py:34-35`):
+```json
+{
+  "model": "gpt-oss-120b"
+}
+```
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Selected model updated successfully"
+}
+```
+
+**前端调用** (`Sidebar.tsx:477-481`):
+```typescript
+await fetch("/api/selected_model", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ model: newModel })
+});
+```
+
+---
+
+##### 10. 获取可用模型列表
+
+**端点**: `GET /available_models`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:306-313` |
+
+**返回格式**:
+```json
+{
+  "models": ["gpt-oss-120b", "gpt-oss-20b"]
+}
+```
+
+**前端调用** (`Sidebar.tsx:107`):
+```typescript
+const response = await fetch("/api/available_models");
+const data = await response.json();
+const models = data.models.map((modelId: string) => ({
+  id: modelId,
+  name: modelId.split('-').map(word => word.charAt(0).toUpperCase() + word.slice(1)).join(' ')
+}));
+```
+
+---
+
+##### 11. 获取所有会话列表
+
+**端点**: `GET /chats`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:316-323` |
+
+**返回格式**:
+```json
+{
+  "chats": ["uuid1", "uuid2", "uuid3"]
+}
+```
+
+---
+
+##### 12. 获取当前会话ID
+
+**端点**: `GET /chat_id`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:326-354` |
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "chat_id": "uuid字符串"
+}
+```
+
+**说明**: 如果当前没有会话，会自动创建一个新会话。
+
+---
+
+##### 13. 更新当前会话ID
+
+**端点**: `POST /chat_id`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:357-375` |
+
+**请求体** (`models.py:27-28`):
+```json
+{
+  "chat_id": "uuid字符串"
+}
+```
+
+---
+
+##### 14. 获取会话元数据
+
+**端点**: `GET /chat/{chat_id}/metadata`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:378-395` |
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `chat_id` | string | 会话UUID |
+
+**返回格式**:
+```json
+{
+  "name": "Chat 12345678"
+}
+```
+
+---
+
+##### 15. 重命名会话
+
+**端点**: `POST /chat/rename`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:398-415` |
+
+**请求体** (`models.py:30-32`):
+```json
+{
+  "chat_id": "uuid字符串",
+  "new_name": "新名称"
+}
+```
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Chat xxx renamed to 新名称"
+}
+```
+
+---
+
+##### 16. 创建新会话
+
+**端点**: `POST /chat/new`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:418-437` |
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "New chat created",
+  "chat_id": "新会话UUID"
+}
+```
+
+---
+
+##### 17. 删除会话
+
+**端点**: `DELETE /chat/{chat_id}`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:440-464` |
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `chat_id` | string | 要删除的会话UUID |
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Chat xxx deleted successfully"
+}
+```
+
+---
+
+##### 18. 清除所有会话
+
+**端点**: `DELETE /chats/clear`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:467-494` |
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Cleared X chats and created new chat",
+  "new_chat_id": "新会话UUID",
+  "cleared_count": X
+}
+```
+
+---
+
+##### 19. 删除向量集合
+
+**端点**: `DELETE /collections/{collection_name}`
+
+| 项目 | 说明 |
+|------|------|
+| 文件位置 | `main.py:497-511` |
+
+**路径参数**:
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `collection_name` | string | 要删除的集合名称 |
+
+**返回格式**:
+```json
+{
+  "status": "success",
+  "message": "Collection 'xxx' deleted successfully"
+}
+```
+
+---
+
+#### 11.4 MCP 工具列表
+
+系统通过 MCP 协议暴露以下工具给 LLM：
+
+| 工具名称 | 所在文件 | 功能描述 |
+|----------|----------|----------|
+| `search_documents` | `rag.py:212-249` | RAG 文档搜索 |
+| `explain_image` | `image_understanding.py:64-68` | 图片理解 |
+| `write_code` | `code_generation.py:31-36` | 代码生成 |
+| `get_weather` | `weather_test.py:52-60` | 获取天气 |
+| `get_rain_forecast` | `weather_test.py:61-68` | 获取降雨预报 |
+
+**search_documents 详细参数**:
+```python
+# rag.py:213-222
+@mcp.tool()
+async def search_documents(query: str) -> str:
+    """Search documents uploaded by the user to generate fast, grounded answers.
+
+    Performs a simple RAG pipeline that retrieves relevant documents and generates answers.
+
+    Args:
+        query: The question or query to search for.
+
+    Returns:
+        A concise answer based on the retrieved documents.
+    """
+```
+
+---
+
+#### 11.5 PostgreSQL 存储接口 (内部)
+
+| 方法 | 函数名 | 行号 | 功能 |
+|------|--------|------|------|
+| async | `init_pool` | postgres_storage.py:89 | 初始化连接池 |
+| async | `get_messages` | postgres_storage.py:289 | 获取消息 |
+| async | `save_messages` | postgres_storage.py:314 | 保存消息（批量） |
+| async | `save_messages_immediate` | postgres_storage.py:321 | 立即保存消息 |
+| async | `add_message` | postgres_storage.py:378 | 添加单条消息 |
+| async | `delete_conversation` | postgres_storage.py:385 | 删除会话 |
+| async | `list_conversations` | postgres_storage.py:402 | 列出所有会话 |
+| async | `store_image` | postgres_storage.py:425 | 存储图片 |
+| async | `get_image` | postgres_storage.py:445 | 获取图片 |
+| async | `get_chat_metadata` | postgres_storage.py:471 | 获取会话元数据 |
+| async | `set_chat_metadata` | postgres_storage.py:502 | 设置会话元数据 |
+
+---
+
+#### 11.6 数据模型定义
+
+**ChatConfig** (`models.py:20-25`):
+```python
+class ChatConfig(BaseModel):
+    sources: List[str]                           # 所有知识源
+    models: List[str]                            # 可用模型列表
+    selected_model: Optional[str] = None          # 当前选中的模型
+    selected_sources: Optional[List[str]] = None  # 当前选中的知识源
+    current_chat_id: Optional[str] = None         # 当前会话ID
+```
+
+**请求模型**:
+
+```python
+# ChatIdRequest (models.py:27-28)
+class ChatIdRequest(BaseModel):
+    chat_id: str
+
+# ChatRenameRequest (models.py:30-32)
+class ChatRenameRequest(BaseModel):
+    chat_id: str
+    new_name: str
+
+# SelectedModelRequest (models.py:34-35)
+class SelectedModelRequest(BaseModel):
+    model: str
+```
+
+---
+
+#### 11.7 前端组件与 API 对应关系
+
+| 前端组件 | 使用的 API |
+|----------|-----------|
+| `page.tsx` | `/api/chat_id` (GET/POST) |
+| `Sidebar.tsx` | `/api/sources`, `/api/selected_sources`, `/api/selected_model`, `/api/available_models`, `/api/chats`, `/api/chat/{id}/metadata`, `/api/chat/rename`, `/api/chat/new`, `/api/chat/{id}` (DELETE), `/api/chats/clear` |
+| `QuerySection.tsx` | `/api/selected_sources`, WebSocket `/ws/chat/{chat_id}` |
+| `DocumentIngestion.tsx` | `/api/ingest` |
+
+---
