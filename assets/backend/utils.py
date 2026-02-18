@@ -62,14 +62,18 @@ async def process_and_ingest_files_background(
             try:
                 file_name = info["filename"]
                 content = info["content"]
-                
+
                 file_path = os.path.join(permanent_dir, file_name)
                 with open(file_path, "wb") as f:
                     f.write(content)
-                
+
                 file_paths.append(file_path)
                 file_names.append(file_name)
-                
+
+                # ====== Register source mapping for cleanup ======
+                vector_store.register_source(file_name, task_id)
+                # ================================================
+
                 logger.debug({
                     "message": "Saved file",
                     "task_id": task_id,
