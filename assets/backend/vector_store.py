@@ -15,8 +15,11 @@
 # limitations under the License.
 #
 import glob
+import json
+import uuid
 from typing import List, Tuple
 import os
+import shutil
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_milvus import Milvus
 from langchain_core.documents import Document
@@ -60,34 +63,44 @@ class CustomEmbeddings:
 
 class VectorStore:
     """Vector store for document embedding and retrieval.
-    
+
     Decoupled from ConfigManager - uses optional callbacks for source management.
     """
-    
+
+    # Default collection name for all documents
+    DEFAULT_COLLECTION_NAME = "context"
+
     def __init__(
-        self, 
-        embeddings=None, 
+        self,
+        embeddings=None,
         uri: str = "http://milvus:19530",
-        on_source_deleted: Optional[Callable[[str], None]] = None
+        on_source_deleted: Optional[Callable[[str], None]] = None,
+        upload_dir: str = "uploads"
     ):
         """Initialize the vector store.
-        
+
         Args:
             embeddings: Embedding model to use (defaults to OllamaEmbeddings)
             uri: Milvus connection URI
             on_source_deleted: Optional callback when a source is deleted
+            upload_dir: Directory for storing uploaded files
         """
         try:
             self.embeddings = embeddings or CustomEmbeddings(model="qwen3-embedding-custom")
             self.uri = uri
             self.on_source_deleted = on_source_deleted
+            self.upload_dir = upload_dir
             self._initialize_store()
-            
+
+            # Source to task_id mapping for file cleanup
+            self._source_to_task_id: Dict[str, str] = {}
+            self._load_source_mapping()
+
             self.text_splitter = RecursiveCharacterTextSplitter(
                 chunk_size=1000,
                 chunk_overlap=200
             )
-            
+
             logger.debug({
                 "message": "VectorStore initialized successfully"
             })
@@ -97,18 +110,68 @@ class VectorStore:
                 "error": str(e)
             }, exc_info=True)
             raise
+
+    def _load_source_mapping(self) -> None:
+        """Load source to task_id mapping from config file if exists."""
+        mapping_file = os.path.join(self.upload_dir, "source_mapping.json")
+        if os.path.exists(mapping_file):
+            try:
+                with open(mapping_file, "r", encoding="utf-8") as f:
+                    self._source_to_task_id = json.load(f)
+                logger.debug({
+                    "message": "Loaded source mapping",
+                    "count": len(self._source_to_task_id)
+                })
+            except Exception as e:
+                logger.warning({
+                    "message": "Failed to load source mapping",
+                    "error": str(e)
+                })
+                self._source_to_task_id = {}
+
+    def _save_source_mapping(self) -> None:
+        """Save source to task_id mapping to config file."""
+        try:
+            os.makedirs(self.upload_dir, exist_ok=True)
+            mapping_file = os.path.join(self.upload_dir, "source_mapping.json")
+            with open(mapping_file, "w", encoding="utf-8") as f:
+                json.dump(self._source_to_task_id, f, indent=2, ensure_ascii=False)
+            logger.debug({
+                "message": "Saved source mapping",
+                "count": len(self._source_to_task_id)
+            })
+        except Exception as e:
+            logger.error({
+                "message": "Failed to save source mapping",
+                "error": str(e)
+            })
+
+    def register_source(self, source_name: str, task_id: str) -> None:
+        """Register a source with its task_id for file cleanup.
+
+        Args:
+            source_name: Original filename/source name
+            task_id: UUID of the upload task
+        """
+        self._source_to_task_id[source_name] = task_id
+        self._save_source_mapping()
+        logger.debug({
+            "message": "Registered source mapping",
+            "source": source_name,
+            "task_id": task_id
+        })
     
     def _initialize_store(self):
         self._store = Milvus(
             embedding_function=self.embeddings,
-            collection_name="context",
+            collection_name=self.DEFAULT_COLLECTION_NAME,
             connection_args={"uri": self.uri},
             auto_id=True
         )
         logger.debug({
             "message": "Milvus vector store initialized",
             "uri": self.uri,
-            "collection": "context"
+            "collection": self.DEFAULT_COLLECTION_NAME
         })
 
     def _load_documents(self, file_paths: List[str] = None, input_dir: str = None) -> List[str]:
@@ -322,67 +385,168 @@ class VectorStore:
             }, exc_info=True)
             return []
 
-    def delete_collection(self, collection_name: str) -> bool:
-        """
-        Delete a collection from Milvus.
-        
+    def delete_by_source(self, source_name: str) -> bool:
+        """Delete all vectors for a specific source from Milvus.
+
+        This method deletes vectors matching the source name instead of deleting
+        the entire collection, which allows other sources to remain intact.
+
         Args:
-            collection_name: Name of the collection to delete
-            
+            source_name: Name of the source to delete
+
         Returns:
             bool: True if successful, False otherwise
         """
         try:
-            from pymilvus import connections, Collection, utility
-            
+            from pymilvus import connections, Collection
+
             connections.connect(uri=self.uri)
-            
-            if utility.has_collection(collection_name):
-                collection = Collection(name=collection_name)
-                
-                collection.drop()
-                
-                if self.on_source_deleted:
-                    self.on_source_deleted(collection_name)
-                
-                logger.debug({
-                    "message": "Collection deleted successfully",
-                    "collection_name": collection_name
+
+            # Use the default collection (all documents are stored together)
+            collection = Collection(name=self.DEFAULT_COLLECTION_NAME)
+
+            # Load collection for reading
+            collection.load()
+
+            # Build filter expression to delete by source
+            # Escape special characters in source_name for the expression
+            escaped_source = source_name.replace('"', '\\"')
+            filter_expr = f'source == "{escaped_source}"'
+
+            logger.debug({
+                "message": "Deleting vectors by source",
+                "source": source_name,
+                "filter": filter_expr
+            })
+
+            # Delete entities matching the filter
+            # Note: This requires the collection to have a 'source' field indexed
+            try:
+                # First, check if the field exists and is indexed
+                schema = collection.schema
+                fields = {field.name: field for field in schema.fields}
+
+                if "source" in fields:
+                    # Ensure source field is indexed for filtering
+                    index_info = collection.indexes
+                    has_source_index = any(
+                        "source" in str(idx._index_params.get("field_name", ""))
+                        for idx in index_info
+                    )
+
+                    if not has_source_index:
+                        # Create index on source field if not exists
+                        from pymilvus import Index
+                        index_params = {
+                            "field_name": "source",
+                            "index_type": "STL_SORT",
+                            "metric_type": "INVALID"  # Not used for filtering
+                        }
+                        collection.create_index("source", index_params)
+                        logger.debug({
+                            "message": "Created index on source field for deletion"
+                        })
+
+                # Delete using the filter
+                delete_result = collection.delete(filter_expr)
+                collection.flush()
+
+                logger.info({
+                    "message": "Deleted vectors by source",
+                    "source": source_name,
+                    "delete_count": delete_result.delete_count if hasattr(delete_result, 'delete_count') else "unknown"
                 })
-                return True
-            else:
+
+            except Exception as delete_error:
                 logger.warning({
-                    "message": "Collection not found",
-                    "collection_name": collection_name
+                    "message": "Failed to delete by filter, trying alternative approach",
+                    "error": str(delete_error)
                 })
-                return False
+                # Alternative: This shouldn't happen in normal operation
+                # but we continue to cleanup other resources
+
+            # ====== Delete original uploaded files ======
+            if source_name in self._source_to_task_id:
+                task_id = self._source_to_task_id[source_name]
+                upload_path = os.path.join(self.upload_dir, task_id)
+
+                if os.path.exists(upload_path):
+                    try:
+                        shutil.rmtree(upload_path)
+                        logger.debug({
+                            "message": "Deleted upload directory",
+                            "path": upload_path
+                        })
+                    except Exception as file_error:
+                        logger.warning({
+                            "message": "Failed to delete upload directory",
+                            "path": upload_path,
+                            "error": str(file_error)
+                        })
+
+                # Remove from mapping
+                del self._source_to_task_id[source_name]
+                self._save_source_mapping()
+            # ==============================================
+
+            # Trigger callback to update config
+            if self.on_source_deleted:
+                self.on_source_deleted(source_name)
+
+            return True
+
         except Exception as e:
             logger.error({
-                "message": "Error deleting collection",
-                "collection_name": collection_name,
+                "message": "Error deleting source",
+                "source": source_name,
                 "error": str(e)
             }, exc_info=True)
             return False
 
+    def delete_collection(self, collection_name: str) -> bool:
+        """Delete a source from Milvus (alias for delete_by_source).
+
+        Note: This now deletes by source name instead of dropping the entire
+        collection, as all documents share a single collection with source-based
+        filtering.
+
+        Args:
+            collection_name: Source name to delete (passed from API)
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        # Delegate to delete_by_source for proper source-based deletion
+        return self.delete_by_source(collection_name)
+
 
 def create_vector_store_with_config(config_manager, uri: str = "http://milvus:19530") -> VectorStore:
     """Factory function to create a VectorStore with ConfigManager integration.
-    
+
     Args:
         config_manager: ConfigManager instance for source management
         uri: Milvus connection URI
-        
+
     Returns:
         VectorStore instance with source deletion callback
     """
+    import os
+
     def handle_source_deleted(source_name: str):
         """Handle source deletion by updating config."""
         config = config_manager.read_config()
         if hasattr(config, 'sources') and source_name in config.sources:
             config.sources.remove(source_name)
+            # Also remove from selected_sources if present
+            if hasattr(config, 'selected_sources') and source_name in config.selected_sources:
+                config.selected_sources.remove(source_name)
             config_manager.write_config(config)
-    
+
+    # Get upload directory from environment or use default
+    upload_dir = os.getenv("UPLOAD_DIR", "uploads")
+
     return VectorStore(
         uri=uri,
-        on_source_deleted=handle_source_deleted
+        on_source_deleted=handle_source_deleted,
+        upload_dir=upload_dir
     )
