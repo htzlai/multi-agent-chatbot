@@ -1,20 +1,20 @@
 # ============================================================
-# Langfuse 配置（唯一示例文件）
-# 复制为本目录下的 .env 并填入真实值。Compose 只读 assets/.env（不读 .evn）
-# Backend 本地跑时，把「Backend 上报用」三项复制到 backend/.env 即可
+# Langfuse 配置示例
+# 复制为 .env 并填入真实值。docker-compose 会从本目录自动加载 .env
+# 注意：文件名必须是 .env（不是 .evn）
 # ============================================================
 
 # ---------- Langfuse 容器用（自托管 Web 服务） ----------
 # JWT/会话签名，至少 32 字符。生成: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-LANGFUSE_NEXTAUTH_SECRET=
+LANGFUSE_NEXTAUTH_SECRET=Ovm1kskiBcOJrnrW0-Z2hNsF7tJ0WFX5creRl_Ir1rE
 # 加密盐，至少 32 字符。生成: python3 -c "import secrets; print(secrets.token_urlsafe(32))"
-LANGFUSE_SALT=
+LANGFUSE_SALT=jyOPg9kRLzSum3Q5rNKkeosTfEX6wGxfm31v7x8D_0I
 # 浏览器访问 Langfuse 的地址
 LANGFUSE_NEXTAUTH_URL=http://localhost:3105
 
 # ---------- Backend 上报用（从 Langfuse 控制台获取） ----------
 # 启动 Langfuse 后打开 http://localhost:3105 -> 创建项目 -> 设置 -> API Keys 中复制
-LANGFUSE_PUBLIC_KEY=
-LANGFUSE_SECRET_KEY=
+LANGFUSE_PUBLIC_KEY=pk-lf-451cd1a8-1394-4e52-9032-c7f2a86ebd19
+LANGFUSE_SECRET_KEY=sk-lf-77127993-f9ca-4f4d-9735-2cc03cb8cc4a
 # 自托管时 Backend 访问 Langfuse 的地址（容器内用服务名）
 LANGFUSE_BASE_URL=http://langfuse:3000
