@@ -261,6 +261,71 @@ RAG MCP Server:
 
 ---
 
+### 纯检索测试 (RAG Debug)
+
+除了完整的 RAG 问答流程，系统还提供了**纯检索测试端点**，用于调试和评估 RAG 检索效果。
+
+#### 纯检索 vs RAG 问答
+
+| 特性 | 纯检索 `/rag/retrieve` | RAG 问答 WebSocket |
+|------|------------------------|-------------------|
+| 调用 GPU | ❌ 否 | ✅ 是 |
+| 调用 LLM | ❌ 否 | ✅ gpt-oss-120b |
+| 用途 | 调试检索效果 | 完整对话 |
+| 响应速度 | 快 | 较慢 |
+
+#### API 端点
+
+```
+POST /rag/retrieve
+```
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|---------|------|
+| `query` | string | ✅ | - | 检索查询 |
+| `sources` | string[] | ❌ | null | 文档源过滤 |
+| `k` | int | ❌ | 8 | 返回结果数量 |
+
+#### 使用示例
+
+```bash
+# 检索所有文档
+curl -X POST http://localhost:8000/rag/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query": "什么是 Geotab", "k": 3}'
+
+# 指定文档源
+curl -X POST http://localhost:8000/rag/retrieve \
+  -H "Content-Type: application/json" \
+  -d '{"query": "什么是人工智能", "k": 2, "sources": ["文档名.pdf"]}'
+```
+
+#### 返回格式
+
+```json
+{
+  "status": "success",
+  "query": "什么是 Geotab",
+  "documents": [
+    {
+      "source": "硬件档案：Geotab GO 系列.docx",
+      "content": "检索到的文本内容...",
+      "score": 0.85
+    }
+  ],
+  "count": 3
+}
+```
+
+#### 适用场景
+
+1. **调试检索效果** - 查看特定查询检索到了哪些文档
+2. **优化 chunk size** - 评估不同分块策略的效果
+3. **排查质量问题** - 检查是否检索到相关文档
+4. **评估 sources 配置** - 验证选中的文档源是否正确
+
+---
+
 ### 五、关键配置文件
 
 | 文件 | 位置 | 作用 |
@@ -729,6 +794,7 @@ async rewrites() {
 | 17 | DELETE | `/chat/{chat_id}` | 删除会话 | main.py:440 |
 | 18 | DELETE | `/chats/clear` | 清除所有会话 | main.py:467 |
 | 19 | DELETE | `/collections/{collection_name}` | 删除向量集合 | main.py:497 |
+| 20 | POST | `/rag/retrieve` | 纯检索测试 | main.py:281 |
 
 #### 11.3 详细接口规范
 
