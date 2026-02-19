@@ -121,6 +121,7 @@ class RAGAgent:
         langfuse = get_langfuse_client()
         span = None
         if langfuse and self._current_trace:
+            # Langfuse SDK v2 API
             span = self._current_trace.span(name="rag_retrieve", input={"question": state.get("question"), "sources": state.get("sources", [])})
 
         sources = state.get("sources", [])
@@ -178,6 +179,7 @@ class RAGAgent:
         langfuse = get_langfuse_client()
         generation = None
         if langfuse and self._current_trace:
+            # Langfuse SDK v2 API
             generation = self._current_trace.generation(
                 name="rag_generate",
                 model=self.model_name,
@@ -266,6 +268,7 @@ async def search_documents(query: str) -> Dict[str, Any]:
     langfuse = get_langfuse_client()
     trace = None
     if langfuse:
+        # Langfuse SDK v2 API
         trace = langfuse.trace(name="rag_search_documents", input={"query": query, "sources": sources})
         rag_agent._current_trace = trace
     else:
