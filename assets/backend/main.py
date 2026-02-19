@@ -37,7 +37,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from agent import ChatAgent
 from config import ConfigManager
 from logger import logger, log_request, log_response, log_error
-from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest
+from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest, RetrieveRequest
 from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
@@ -267,7 +267,7 @@ async def get_selected_sources():
 @app.post("/selected_sources")
 async def update_selected_sources(selected_sources: List[str]):
     """Update the selected document sources for RAG.
-    
+
     Args:
         selected_sources: List of source names to use for retrieval
     """
@@ -276,6 +276,69 @@ async def update_selected_sources(selected_sources: List[str]):
         return {"status": "success", "message": "Selected sources updated successfully"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error updating selected sources: {str(e)}")
+
+
+@app.post("/rag/retrieve")
+async def retrieve_documents(request: RetrieveRequest):
+    """Pure retrieval test endpoint - returns retrieved document chunks.
+
+    This endpoint allows testing the RAG retrieval functionality without
+    going through the full chat pipeline. Useful for debugging and testing
+    document retrieval quality.
+
+    Args:
+        request: RetrieveRequest with query, optional sources filter, and k value
+
+    Returns:
+        JSON with list of retrieved documents including source, content, and score
+    """
+    try:
+        logger.debug({
+            "message": "Retrieving documents for testing",
+            "query": request.query,
+            "sources": request.sources,
+            "k": request.k
+        })
+
+        # Perform retrieval from vector store
+        docs = vector_store.get_documents(
+            query=request.query,
+            k=request.k,
+            sources=request.sources
+        )
+
+        # Format response
+        documents = []
+        for doc in docs:
+            doc_info = {
+                "source": doc.metadata.get("source", "unknown"),
+                "content": doc.page_content,
+            }
+            # Include score if available
+            if "score" in doc.metadata:
+                doc_info["score"] = doc.metadata["score"]
+            documents.append(doc_info)
+
+        logger.debug({
+            "message": "Document retrieval completed",
+            "query": request.query,
+            "documents_retrieved": len(documents)
+        })
+
+        return {
+            "status": "success",
+            "query": request.query,
+            "documents": documents,
+            "count": len(documents)
+        }
+
+    except Exception as e:
+        logger.error({
+            "message": "Error retrieving documents",
+            "query": request.query,
+            "error": str(e)
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error retrieving documents: {str(e)}")
 
 
 @app.get("/selected_model")
