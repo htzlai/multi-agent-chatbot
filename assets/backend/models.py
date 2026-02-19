@@ -32,9 +32,4 @@ class ChatRenameRequest(BaseModel):
     new_name: str
 
 class SelectedModelRequest(BaseModel):
-    model: str
-
-class RetrieveRequest(BaseModel):
-    query: str
-    sources: Optional[List[str]] = None
-    k: int = 8
+    model: str      
