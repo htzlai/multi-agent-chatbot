@@ -17,7 +17,7 @@
 | 文件 | 说明 |
 |------|------|
 | [backend/langfuse_client.py](../langfuse_client.py) | 单例 Langfuse 客户端，读取 `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_BASE_URL`，未配置时返回 `None` |
-| [backend/.env.example](../.env.example) | 环境变量示例，含 Langfuse 三项 |
+| [assets/.env.example](../../.env.example) | **唯一**环境变量示例（Langfuse 容器 + Backend 上报），复制为 `assets/.env` 使用 |
 | backend/docs/LANGFUSE_INTEGRATION.md | 本说明与故障排查文档 |
 
 ### 3. 代码改动
@@ -50,7 +50,7 @@
 
 ## 三、完整配置清单（推荐顺序）
 
-所有配置写在 **`assets/.env`**。Compose 只会自动加载同目录下的 **`.env`**，不会加载 `.evn`；若你之前写在 `.evn`，请重命名为 `.env` 或把内容合并进 `.env`。
+所有配置写在 **`assets/.env`**（Compose 只认这个文件名）。**实际生效的是 `assets/.env`**；若你写在 `assets/.evn`，Compose 不会读，请把内容挪到 `assets/.env` 或把 `.evn` 重命名为 `.env`。示例仅一份：`assets/.env.example`。
 
 | 步骤 | 操作 |
 |------|------|
