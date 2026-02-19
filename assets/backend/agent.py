@@ -234,6 +234,7 @@ class ChatAgent:
             logger.debug(f'Executing tool {i+1}/{len(last_message.tool_calls)}: {tool_call["name"]} with args: {tool_call["args"]}')
             await self.stream_callback({'type': 'tool_start', 'data': tool_call["name"]})
             
+            tool_result = None
             try:
                 if tool_call["name"] == "explain_image" and state.get("image_data"):
                     tool_args = tool_call["args"].copy()
@@ -254,6 +255,22 @@ class ChatAgent:
                 content = f"Error executing tool '{tool_call['name']}': {str(e)}"
             
             await self.stream_callback({'type': 'tool_end', 'data': tool_call["name"]})
+            
+            # Extract and stream source information from RAG search results
+            if tool_call["name"] == "search_documents" and isinstance(tool_result, dict) and "context" in tool_result:
+                sources = []
+                for doc in tool_result.get("context", []):
+                    if hasattr(doc, 'metadata') and doc.metadata:
+                        source_info = {
+                            "source": doc.metadata.get("source"),
+                            "content": doc.page_content[:200] if doc.page_content else "",
+                        }
+                        if "score" in doc.metadata:
+                            source_info["score"] = doc.metadata["score"]
+                        if source_info["source"]:
+                            sources.append(source_info)
+                if sources:
+                    await self.stream_callback({"type": "sources", "data": sources})
 
             outputs.append(
                 ToolMessage(

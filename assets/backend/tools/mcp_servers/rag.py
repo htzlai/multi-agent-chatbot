@@ -243,7 +243,7 @@ vector_store = create_vector_store_with_config(rag_agent.config_manager)
 
 
 @mcp.tool()
-async def search_documents(query: str) -> str:
+async def search_documents(query: str) -> Dict[str, Any]:
     """Search documents uploaded by the user to generate fast, grounded answers.
 
     Performs a simple RAG pipeline that retrieves relevant documents and generates answers.
@@ -252,7 +252,7 @@ async def search_documents(query: str) -> str:
         query: The question or query to search for.
 
     Returns:
-        A concise answer based on the retrieved documents.
+        A dict containing the answer content and retrieved context with source information.
     """
     config_obj = rag_agent.config_manager.read_config()
     sources = config_obj.selected_sources or []
@@ -281,7 +281,10 @@ async def search_documents(query: str) -> str:
                     trace.end(output=None, level="ERROR", status_message="No messages in RAG result")
                 except Exception as e:
                     logger.debug(f"Langfuse trace.end failed: {e}")
-            return "I apologize, but I encountered an error processing your query and no response was generated."
+            return {
+                "content": "I apologize, but I encountered an error processing your query and no response was generated.",
+                "context": []
+            }
 
         final_message = result["messages"][-1]
         final_content = getattr(final_message, 'content', '') or ''
@@ -294,10 +297,18 @@ async def search_documents(query: str) -> str:
 
         if not final_content.strip():
             logger.warning({"message": "Empty content in final RAG message", "query": query, "message_type": type(final_message).__name__})
-            return f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question."
+            return {
+                "content": f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question.",
+                "context": result.get("context", [])
+            }
 
         logger.info({"message": "RAG result", "content_length": len(final_content), "query": query})
-        return final_content
+        
+        # Return structured response with context for source extraction
+        return {
+            "content": final_content,
+            "context": result.get("context", [])
+        }
     except Exception as e:
         if trace:
             try:
