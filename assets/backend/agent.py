@@ -28,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from openai import AsyncOpenAI
 
 from client import MCPClient
+from langfuse_client import get_langfuse_client
 from logger import logger
 from prompts import Prompts
 from postgres_storage import PostgreSQLConversationStorage
@@ -80,6 +81,7 @@ class ChatAgent:
         self.graph = self._build_graph()
         self.stream_callback = None
         self.last_state = None
+        self._current_trace = None
 
     @classmethod
     async def create(cls, vector_store, config_manager, postgres_storage: PostgreSQLConversationStorage):
@@ -311,6 +313,16 @@ class ChatAgent:
                 "tools": self.openai_tools,
                 "tool_choice": "auto"
             }
+
+        langfuse = get_langfuse_client()
+        generation = None
+        if langfuse and self._current_trace:
+            generation = self._current_trace.generation(
+                name="llm",
+                model=self.current_model,
+                input=messages,
+                metadata={"chat_id": state.get("chat_id"), "iterations": state.get("iterations", 0)},
+            )
         
         stream = await self.model_client.chat.completions.create(
             model=self.current_model,
@@ -324,6 +336,12 @@ class ChatAgent:
         llm_output_buffer, tool_calls_buffer = await self._stream_response(stream, self.stream_callback)
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
+
+        if generation is not None:
+            try:
+                generation.end(output=raw_output)
+            except Exception as e:
+                logger.debug(f"Langfuse generation.end failed: {e}")
         
         logger.debug({
             "message": "Tool call generation results",
@@ -472,6 +490,15 @@ class ChatAgent:
         })
 
         config = {"configurable": {"thread_id": chat_id}}
+        langfuse = get_langfuse_client()
+        if langfuse:
+            self._current_trace = langfuse.trace(
+                name="chat_query",
+                metadata={"chat_id": chat_id},
+                input={"query": query_text[:500], "chat_id": chat_id},
+            )
+        else:
+            self._current_trace = None
 
         try:
             existing_messages = await self.conversation_store.get_messages(chat_id, limit=1)
@@ -537,10 +564,31 @@ class ChatAgent:
                     "chat_id": chat_id,
                     "final_iterations": self.last_state.get("iterations", 0) if self.last_state else 0
                 })
+                if langfuse and self._current_trace:
+                    try:
+                        output = None
+                        if self.last_state and self.last_state.get("messages"):
+                            last_msg = self.last_state["messages"][-1]
+                            content = getattr(last_msg, "content", None)
+                            if content:
+                                output = content[:2000]
+                        self._current_trace.end(output=output)
+                    except Exception as e:
+                        logger.debug(f"Langfuse trace.end failed: {e}")
+                    self._current_trace = None
 
         except Exception as e:
             logger.error({"message": "GRAPH: EXECUTION FAILED", "error": str(e), "chat_id": chat_id}, exc_info=True)
+            if langfuse and self._current_trace:
+                try:
+                    self._current_trace.end(output=None, level="ERROR", status_message=str(e))
+                except Exception as end_err:
+                    logger.debug(f"Langfuse trace.end failed: {end_err}")
+                self._current_trace = None
             yield {"type": "error", "data": f"Error performing query: {str(e)}"}
+        finally:
+            if self._current_trace is not None:
+                self._current_trace = None
 
 
     async def _queue_writer(self, event: Dict[str, Any], token_q: asyncio.Queue) -> None:
