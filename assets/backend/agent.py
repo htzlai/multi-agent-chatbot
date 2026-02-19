@@ -340,23 +340,56 @@ class ChatAgent:
                 input=messages,
                 metadata={"chat_id": state.get("chat_id"), "iterations": state.get("iterations", 0)},
             )
-        
-        stream = await self.model_client.chat.completions.create(
+
+        # 并行发起流式和非流式请求：流式返回内容，非流式获取 usage
+        import asyncio
+        stream_task = asyncio.create_task(
+            self.model_client.chat.completions.create(
+                model=self.current_model,
+                messages=messages,
+                temperature=0,
+                top_p=1,
+                stream=True,
+                **tool_params
+            )
+        )
+        # 非流式请求用于获取 usage
+        non_stream_resp = await self.model_client.chat.completions.create(
             model=self.current_model,
             messages=messages,
             temperature=0,
             top_p=1,
-            stream=True,
+            stream=False,
             **tool_params
         )
 
+        # 获取 usage
+        usage = None
+        try:
+            if hasattr(non_stream_resp, 'usage') and non_stream_resp.usage:
+                usage = {
+                    "prompt_tokens": non_stream_resp.usage.prompt_tokens,
+                    "completion_tokens": non_stream_resp.usage.completion_tokens,
+                    "total_tokens": non_stream_resp.usage.total_tokens,
+                }
+                logger.info({"message": "Token usage", "usage": usage, "chat_id": state.get("chat_id")})
+            else:
+                logger.warning({"message": "No usage in non-stream response", "chat_id": state.get("chat_id")})
+        except Exception as e:
+            logger.warning({"message": "Failed to get usage", "error": str(e), "chat_id": state.get("chat_id")})
+
+        # 使用流式响应返回内容
+        stream = await stream_task
         llm_output_buffer, tool_calls_buffer = await self._stream_response(stream, self.stream_callback)
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
 
         if generation is not None:
             try:
-                generation.end(output=raw_output)
+                generation.end(
+                    output=raw_output,
+                    usage=usage,
+                )
             except Exception as e:
                 logger.debug(f"Langfuse generation.end failed: {e}")
         
