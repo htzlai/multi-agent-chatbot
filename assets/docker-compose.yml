@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# 环境变量：Compose 会从本目录自动加载 .env 做变量替换。
+# Langfuse 与 Backend 的 LANGFUSE_* 均在此配置，参见 assets/.env.example。
+#
 services:
   backend:
     container_name: backend
@@ -40,6 +43,10 @@ services:
       - MILVUS_ADDRESS=milvus:19530
       - MODELS=gpt-oss-120b #,gpt-oss-20b
       - UPLOAD_DIR=/app/uploads
+      # Optional: Langfuse LLM observability (leave empty to disable)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-}
 
   frontend:
     container_name: frontend
@@ -128,10 +135,32 @@ services:
       - "etcd"
       - "minio"
 
+  # ============================================================
+  # Langfuse: LLM 可观测性 (可选，需配置 LANGFUSE_* 后 backend 才会上报)
+  # 端口: 3105 -> 3000 (Web UI)
+  # 首次启动前需在 postgres 中创建库: CREATE DATABASE langfuse;
+  # ============================================================
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: langfuse
+    ports:
+      - "3105:3000"
+    environment:
+      - DATABASE_URL=postgres://chatbot_user:chatbot_password@postgres:5432/langfuse
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-change-me-in-production}
+      - NEXTAUTH_URL=${LANGFUSE_NEXTAUTH_URL:-http://localhost:3105}
+      - SALT=${LANGFUSE_SALT:-change-me-in-production}
+    volumes:
+      - langfuse-data:/var/lib/langfuse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   backend_uploads:
+  langfuse-data:
 
 networks:
   default:

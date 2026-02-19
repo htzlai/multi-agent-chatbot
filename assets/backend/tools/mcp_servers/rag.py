@@ -46,6 +46,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
 from config import ConfigManager
+from langfuse_client import get_langfuse_client
 from vector_store import VectorStore, create_vector_store_with_config
 
 
@@ -92,7 +93,7 @@ class RAGAgent:
         )
 
         self.generation_prompt = self._get_generation_prompt()
-        
+        self._current_trace = None
 
         self.graph = self._build_graph()
 
@@ -117,25 +118,36 @@ class RAGAgent:
     def retrieve(self, state: RAGState) -> Dict:
         """Retrieve relevant documents from the vector store."""
         logger.info({"message": "Starting document retrieval"})
+        langfuse = get_langfuse_client()
+        span = None
+        if langfuse and self._current_trace:
+            span = self._current_trace.span(name="rag_retrieve", input={"question": state.get("question"), "sources": state.get("sources", [])})
+
         sources = state.get("sources", [])
-        
+
         if sources:
             logger.info({"message": "Attempting retrieval with source filters", "sources": sources})
             retrieved_docs = self.vector_store.get_documents(state["question"], sources=sources)
         else:
             logger.info({"message": "No sources specified, searching all documents"})
             retrieved_docs = self.vector_store.get_documents(state["question"])
-        
+
         if not retrieved_docs and sources:
             logger.info({"message": "No documents found with source filtering, trying without filters"})
             retrieved_docs = self.vector_store.get_documents(state["question"])
-        
+
         if retrieved_docs:
             sources_found = set(doc.metadata.get("source", "unknown") for doc in retrieved_docs)
             logger.info({"message": "Document sources found", "sources": list(sources_found), "doc_count": len(retrieved_docs)})
         else:
             logger.warning({"message": "No documents retrieved", "query": state["question"], "attempted_sources": sources})
-            
+
+        if span is not None:
+            try:
+                span.end(output={"doc_count": len(retrieved_docs) if retrieved_docs else 0})
+            except Exception as e:
+                logger.debug(f"Langfuse span.end failed: {e}")
+
         return {"context": retrieved_docs}
 
 
@@ -163,24 +175,45 @@ class RAGAgent:
             {"role": "user", "content": user_message}
         ]
 
+        langfuse = get_langfuse_client()
+        generation = None
+        if langfuse and self._current_trace:
+            generation = self._current_trace.generation(
+                name="rag_generate",
+                model=self.model_name,
+                input=messages,
+                metadata={"context_count": len(context) if context else 0},
+            )
+
         try:
             response = await self.model_client.chat.completions.create(
                     model=self.model_name,
                     messages=messages,
             )
             response_content = response.choices[0].message.content
-            
+
+            if generation is not None:
+                try:
+                    generation.end(output=response_content)
+                except Exception as end_err:
+                    logger.debug(f"Langfuse generation.end failed: {end_err}")
+
             logger.info({
                 "message": "Generation completed",
                 "response_length": len(response_content),
                 "response_preview": response_content[:100] + "..."
             })
-            
+
             return {
                 "messages": [HumanMessage(content=state["question"]), AIMessage(content=response_content)]
             }
         except Exception as e:
             logger.error({"message": "Error during generation", "error": str(e)})
+            if generation is not None:
+                try:
+                    generation.end(output=None, level="ERROR", status_message=str(e))
+                except Exception as end_err:
+                    logger.debug(f"Langfuse generation.end failed: {end_err}")
             fallback_response = f"I apologize, but I encountered an error while processing your query about: {state['question']}"
             return {
                 "messages": [HumanMessage(content=state["question"]), AIMessage(content=fallback_response)]
@@ -212,41 +245,68 @@ vector_store = create_vector_store_with_config(rag_agent.config_manager)
 @mcp.tool()
 async def search_documents(query: str) -> str:
     """Search documents uploaded by the user to generate fast, grounded answers.
-    
+
     Performs a simple RAG pipeline that retrieves relevant documents and generates answers.
-    
+
     Args:
         query: The question or query to search for.
-        
+
     Returns:
         A concise answer based on the retrieved documents.
     """
     config_obj = rag_agent.config_manager.read_config()
     sources = config_obj.selected_sources or []
-    
+
     initial_state = {
         "question": query,
         "sources": sources,
         "messages": []
     }
-    
-    thread_id = f"rag_session_{time.time()}"
-    
-    result = await rag_agent.graph.ainvoke(initial_state)
-    
-    if not result.get("messages"):
-        logger.error({"message": "No messages in RAG result", "query": query})
-        return "I apologize, but I encountered an error processing your query and no response was generated."
-    
-    final_message = result["messages"][-1]
-    final_content = getattr(final_message, 'content', '') or ''
-    
-    if not final_content.strip():
-        logger.warning({"message": "Empty content in final RAG message", "query": query, "message_type": type(final_message).__name__})
-        return f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question."
-    
-    logger.info({"message": "RAG result", "content_length": len(final_content), "query": query})
-    return final_content
+
+    langfuse = get_langfuse_client()
+    trace = None
+    if langfuse:
+        trace = langfuse.trace(name="rag_search_documents", input={"query": query, "sources": sources})
+        rag_agent._current_trace = trace
+    else:
+        rag_agent._current_trace = None
+
+    try:
+        result = await rag_agent.graph.ainvoke(initial_state)
+
+        if not result.get("messages"):
+            logger.error({"message": "No messages in RAG result", "query": query})
+            if trace:
+                try:
+                    trace.end(output=None, level="ERROR", status_message="No messages in RAG result")
+                except Exception as e:
+                    logger.debug(f"Langfuse trace.end failed: {e}")
+            return "I apologize, but I encountered an error processing your query and no response was generated."
+
+        final_message = result["messages"][-1]
+        final_content = getattr(final_message, 'content', '') or ''
+
+        if trace:
+            try:
+                trace.end(output=final_content[:2000] if final_content else None)
+            except Exception as e:
+                logger.debug(f"Langfuse trace.end failed: {e}")
+
+        if not final_content.strip():
+            logger.warning({"message": "Empty content in final RAG message", "query": query, "message_type": type(final_message).__name__})
+            return f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question."
+
+        logger.info({"message": "RAG result", "content_length": len(final_content), "query": query})
+        return final_content
+    except Exception as e:
+        if trace:
+            try:
+                trace.end(output=None, level="ERROR", status_message=str(e))
+            except Exception as end_err:
+                logger.debug(f"Langfuse trace.end failed: {end_err}")
+        raise
+    finally:
+        rag_agent._current_trace = None
 
 
 if __name__ == "__main__":
