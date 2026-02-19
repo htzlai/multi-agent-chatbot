@@ -46,11 +46,12 @@ def get_langfuse_client() -> Optional["Langfuse"]:
     try:
         from langfuse import Langfuse
 
-        base_url = os.getenv("LANGFUSE_BASE_URL", "").strip() or None
+        # Langfuse v2 uses 'host' instead of 'base_url'
+        base_url = os.getenv("LANGFUSE_BASE_URL", "").strip()
         _langfuse_client = Langfuse(
             public_key=public_key,
             secret_key=secret_key,
-            base_url=base_url,
+            host=base_url if base_url else None,
         )
         logger.debug("Langfuse client initialized successfully")
         return _langfuse_client

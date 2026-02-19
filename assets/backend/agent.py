@@ -28,7 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from openai import AsyncOpenAI
 
 from client import MCPClient
-from langfuse_client import get_langfuse_client
+from langfuse_client import get_langfuse_client, flush_langfuse
 from logger import logger
 from prompts import Prompts
 from postgres_storage import PostgreSQLConversationStorage
@@ -234,7 +234,6 @@ class ChatAgent:
             logger.debug(f'Executing tool {i+1}/{len(last_message.tool_calls)}: {tool_call["name"]} with args: {tool_call["args"]}')
             await self.stream_callback({'type': 'tool_start', 'data': tool_call["name"]})
             
-            tool_result = None
             try:
                 if tool_call["name"] == "explain_image" and state.get("image_data"):
                     tool_args = tool_call["args"].copy()
@@ -334,6 +333,7 @@ class ChatAgent:
         langfuse = get_langfuse_client()
         generation = None
         if langfuse and self._current_trace:
+            # Langfuse SDK v2 API: use trace.generation()
             generation = self._current_trace.generation(
                 name="llm",
                 model=self.current_model,
@@ -502,17 +502,19 @@ class ChatAgent:
         logger.debug({
             "message": "GRAPH: STARTING EXECUTION",
             "chat_id": chat_id,
-            "query": query_text[:100] + "..." if len(query_text) > 100 else query_text,
+            "query": (query_text[:100] + "..." if query_text and len(query_text) > 100 else query_text) if query_text else "",
             "graph_flow": "START → generate → should_continue → action → generate → END"
         })
 
         config = {"configurable": {"thread_id": chat_id}}
         langfuse = get_langfuse_client()
         if langfuse:
+            logger.info({"message": "Creating Langfuse trace", "chat_id": chat_id})
+            # Langfuse SDK v2 API
             self._current_trace = langfuse.trace(
                 name="chat_query",
                 metadata={"chat_id": chat_id},
-                input={"query": query_text[:500], "chat_id": chat_id},
+                input={"query": query_text[:500] if query_text else "", "chat_id": chat_id},
             )
         else:
             self._current_trace = None
@@ -606,6 +608,11 @@ class ChatAgent:
         finally:
             if self._current_trace is not None:
                 self._current_trace = None
+            # Flush Langfuse to ensure all traces are sent
+            try:
+                flush_langfuse()
+            except Exception as e:
+                logger.debug(f"Langfuse flush failed: {e}")
 
 
     async def _queue_writer(self, event: Dict[str, Any], token_q: asyncio.Queue) -> None:
