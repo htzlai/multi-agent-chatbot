@@ -28,6 +28,7 @@ from langgraph.graph import END, START, StateGraph
 from openai import AsyncOpenAI
 
 from client import MCPClient
+from langfuse_client import get_langfuse_client, flush_langfuse
 from logger import logger
 from prompts import Prompts
 from postgres_storage import PostgreSQLConversationStorage
@@ -80,6 +81,9 @@ class ChatAgent:
         self.graph = self._build_graph()
         self.stream_callback = None
         self.last_state = None
+        
+        # Langfuse tracing
+        self._current_trace = None
 
     @classmethod
     async def create(cls, vector_store, config_manager, postgres_storage: PostgreSQLConversationStorage):
@@ -292,6 +296,21 @@ class ChatAgent:
         })
         await self.stream_callback({'type': 'node_start', 'data': 'generate'})
 
+        # Langfuse: Create generation for LLM call
+        langfuse = get_langfuse_client()
+        generation = None
+        if langfuse and self._current_trace:
+            try:
+                # Langfuse v2 API: use trace.generation()
+                generation = self._current_trace.generation(
+                    name="llm",
+                    model=self.current_model,
+                    input=messages,
+                    metadata={"chat_id": state.get("chat_id"), "iterations": state.get("iterations", 0)},
+                )
+            except Exception as e:
+                logger.debug(f"Langfuse generation creation failed: {e}")
+
         supports_tools = self.current_model in {"gpt-oss-20b", "gpt-oss-120b"}
         has_tools = supports_tools and self.openai_tools and len(self.openai_tools) > 0
         
@@ -321,10 +340,24 @@ class ChatAgent:
             **tool_params
         )
 
-        llm_output_buffer, tool_calls_buffer = await self._stream_response(stream, self.stream_callback)
+        llm_output_buffer, tool_calls_buffer, usage = await self._stream_response(stream, self.stream_callback, messages)
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
-        
+
+        # Langfuse: End generation with output and token stats
+        if generation is not None:
+            try:
+                generation.end(
+                    output=raw_output,
+                    usage={
+                        "prompt_tokens": usage.get("prompt_tokens", 0),
+                        "completion_tokens": usage.get("completion_tokens", 0),
+                        "total_tokens": usage.get("total_tokens", 0),
+                    }
+                )
+            except Exception as e:
+                logger.debug(f"Langfuse generation.end failed: {e}")
+
         logger.debug({
             "message": "Tool call generation results",
             "chat_id": state.get("chat_id"),
@@ -404,21 +437,36 @@ class ChatAgent:
             )
         return tool_calls
 
-    async def _stream_response(self, stream, stream_callback: StreamCallback) -> tuple[List[str], Dict[int, Dict[str, str]]]:
+    async def _stream_response(self, stream, stream_callback: StreamCallback, messages: List = None) -> tuple[List[str], Dict[int, Dict[str, str]], Dict]:
         """Process streaming LLM response and extract content and tool calls.
         
         Args:
             stream: Async stream from LLM
             stream_callback: Callback for streaming events
+            messages: Original messages for prompt token counting
             
         Returns:
-            Tuple of (content_buffer, tool_calls_buffer)
+            Tuple of (content_buffer, tool_calls_buffer, usage_dict)
         """
         llm_output_buffer = []
         tool_calls_buffer = {}
         saw_tool_finish = False
+        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        
+        # For token counting (some local LLMs don't return usage in API response)
+        try:
+            import tiktoken
+            enc = tiktoken.get_encoding("cl100k_base")
+        except Exception:
+            enc = None
 
         async for chunk in stream:
+            # Collect usage from final chunk if available
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage["prompt_tokens"] = getattr(chunk.usage, 'prompt_tokens', 0) or 0
+                usage["completion_tokens"] = getattr(chunk.usage, 'completion_tokens', 0) or 0
+                usage["total_tokens"] = getattr(chunk.usage, 'total_tokens', 0) or 0
+                
             for choice in getattr(chunk, "choices", []) or []:
                 delta = getattr(choice, "delta", None)
                 if not delta:
@@ -452,7 +500,27 @@ class ChatAgent:
             if saw_tool_finish:
                 break
 
-        return llm_output_buffer, tool_calls_buffer
+        # If no usage from API, calculate manually with tiktoken
+        if usage["total_tokens"] == 0 and enc and llm_output_buffer:
+            try:
+                output_text = "".join(llm_output_buffer)
+                usage["completion_tokens"] = len(enc.encode(output_text))
+                
+                # Calculate prompt tokens from messages
+                if messages:
+                    prompt_text = ""
+                    for msg in messages:
+                        if hasattr(msg, 'content'):
+                            prompt_text += f"{msg.type}: {msg.content} "
+                        elif isinstance(msg, dict):
+                            prompt_text += f"{msg.get('role', 'user')}: {msg.get('content', '')} "
+                    usage["prompt_tokens"] = len(enc.encode(prompt_text))
+                
+                usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
+            except Exception:
+                pass
+
+        return llm_output_buffer, tool_calls_buffer, usage
 
     async def query(self, query_text: str, chat_id: str, image_data: str = None) -> AsyncIterator[Dict[str, Any]]:
         """Process user query and stream response tokens.
@@ -464,6 +532,16 @@ class ChatAgent:
         Yields:
             Streaming events and tokens
         """
+        # Langfuse: Create trace for this query
+        langfuse = get_langfuse_client()
+        self._current_trace = None
+        if langfuse:
+            self._current_trace = langfuse.trace(
+                name="chat_query",
+                metadata={"chat_id": chat_id}
+            )
+            logger.debug("Langfuse trace created for chat_id: " + chat_id)
+
         logger.debug({
             "message": "GRAPH: STARTING EXECUTION",
             "chat_id": chat_id,
@@ -541,6 +619,9 @@ class ChatAgent:
         except Exception as e:
             logger.error({"message": "GRAPH: EXECUTION FAILED", "error": str(e), "chat_id": chat_id}, exc_info=True)
             yield {"type": "error", "data": f"Error performing query: {str(e)}"}
+        finally:
+            # Langfuse: Flush pending events to ensure traces are sent
+            flush_langfuse()
 
 
     async def _queue_writer(self, event: Dict[str, Any], token_q: asyncio.Queue) -> None:

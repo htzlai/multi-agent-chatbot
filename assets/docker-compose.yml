@@ -40,8 +40,12 @@ services:
       - ETCD_ENDPOINTS=etcd:2379
       - MINIO_ADDRESS=minio:9000
       - MILVUS_ADDRESS=milvus:19530
-      - MODELS=gpt-oss-120b #,gpt-oss-20b
+      - MODELS=gpt-oss-120b
       - UPLOAD_DIR=/app/uploads
+      # Langfuse 配置 (AI 可观测性)
+      - LANGFUSE_PUBLIC_KEY=pk-lf-451cd1a8-1394-4e52-9032-c7f2a86ebd19
+      - LANGFUSE_SECRET_KEY=sk-lf-77127993-f9ca-4f4d-9735-2cc03cb8cc4a
+      - LANGFUSE_BASE_URL=http://langfuse:3000
 
   frontend:
     container_name: frontend
