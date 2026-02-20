@@ -114,7 +114,7 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
-    command: 
+    command:
       - "-m"
       - "/models/gpt-oss-120b-mxfp4-00001-of-00003.gguf"
       - "--port"
@@ -122,15 +122,21 @@ services:
       - "--host"
       - "0.0.0.0"
       - "-n"
-      - "2048"              # ← 改为合理批次大小
+      - "2048"
       - "--n-gpu-layers"
       - "70"
       - "--jinja"
       - "-fa"
-      - "1"                 # ← 新增：启用 Flash Attention
-      - "--no-mmap"         # ← 新增：提升加载性能
+      - "1"
+      - "--no-mmap"
       - "--reasoning-format"
-      - "auto"              # ← 新增：推理模型支持
+      - "auto"
+      # 并发处理参数 (llama.cpp 官方支持)
+      - "--ctx-size" 
+      - "131072"    
+      - "--parallel"
+      - "2"               # 支持4个并发请求
+      - "--cont-batching" # 启用连续批处理，提升吞吐量
 
   deepseek-coder:
     <<: *build-base
