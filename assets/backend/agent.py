@@ -17,6 +17,7 @@
 """ChatAgent implementation for LLM-powered conversational AI with tool calling."""
 
 import asyncio
+import contextvars
 import contextlib
 import json
 from typing import AsyncIterator, List, Dict, Any, TypedDict, Optional, Callable, Awaitable
@@ -38,6 +39,9 @@ from utils import convert_langgraph_messages_to_openai
 memory = MemorySaver()
 SENTINEL = object()
 StreamCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+
+# 使用 contextvars 实现并发隔离 - 每个异步任务有独立的 stream_callback
+_stream_callback_var: contextvars.ContextVar[Optional[StreamCallback]] = contextvars.ContextVar('stream_callback', default=None)
 
 
 class State(TypedDict, total=False):
@@ -79,8 +83,8 @@ class ChatAgent:
         self.system_prompt = None
         
         self.graph = self._build_graph()
-        self.stream_callback = None
         self.last_state = None
+        # 移除了 self.stream_callback，改为使用 contextvars 隔离
         
         # Langfuse tracing
         self._current_trace = None
@@ -213,6 +217,13 @@ class ChatAgent:
         logger.debug({"message": "GRAPH: should_continue → CONTINUE (has tool calls)", "chat_id": state.get("chat_id")})
         return "continue"
 
+    def _get_stream_callback(self) -> StreamCallback:
+        """获取当前上下文的 stream callback。
+        
+        使用 contextvars 实现并发隔离，每个异步任务可以有不同的回调。
+        """
+        return _stream_callback_var.get()
+
     async def tool_node(self, state: State) -> Dict[str, Any]:
         """Execute tools from the last AI message's tool calls.
         
@@ -222,19 +233,22 @@ class ChatAgent:
         Returns:
             Updated state with tool results and incremented iteration count
         """
+        stream_callback = self._get_stream_callback()
         logger.debug({
             "message": "GRAPH: ENTERING NODE - action/tool_node",
             "chat_id": state.get("chat_id"),
             "iterations": state.get("iterations", 0)
         })
-        await self.stream_callback({'type': 'node_start', 'data': 'tool_node'})
+        if stream_callback:
+            await stream_callback({'type': 'node_start', 'data': 'tool_node'})
         
         outputs = []
         messages = state.get("messages", [])
         last_message = messages[-1]
         for i, tool_call in enumerate(last_message.tool_calls):
             logger.debug(f'Executing tool {i+1}/{len(last_message.tool_calls)}: {tool_call["name"]} with args: {tool_call["args"]}')
-            await self.stream_callback({'type': 'tool_start', 'data': tool_call["name"]})
+            if stream_callback:
+                await stream_callback({'type': 'tool_start', 'data': tool_call["name"]})
             
             try:
                 if tool_call["name"] == "explain_image" and state.get("image_data"):
@@ -255,7 +269,8 @@ class ChatAgent:
                 logger.error(f'Error executing tool {tool_call["name"]}: {str(e)}', exc_info=True)
                 content = f"Error executing tool '{tool_call['name']}': {str(e)}"
             
-            await self.stream_callback({'type': 'tool_end', 'data': tool_call["name"]})
+            if stream_callback:
+                await stream_callback({'type': 'tool_end', 'data': tool_call["name"]})
 
             outputs.append(
                 ToolMessage(
@@ -274,7 +289,8 @@ class ChatAgent:
             "tools_executed": len(outputs),
             "next_step": "→ returning to generate"
         })
-        await self.stream_callback({'type': 'node_end', 'data': 'tool_node'})
+        if stream_callback:
+            await stream_callback({'type': 'node_end', 'data': 'tool_node'})
         return {"messages": messages + outputs, "iterations": state.get("iterations", 0) + 1}
 
     async def generate(self, state: State) -> Dict[str, Any]:
@@ -286,6 +302,7 @@ class ChatAgent:
         Returns:
             Updated state with new AI message
         """
+        stream_callback = self._get_stream_callback()
         messages = convert_langgraph_messages_to_openai(state.get("messages", []))
         logger.debug({
             "message": "GRAPH: ENTERING NODE - generate",
@@ -294,7 +311,8 @@ class ChatAgent:
             "current_model": self.current_model,
             "message_count": len(state.get("messages", []))
         })
-        await self.stream_callback({'type': 'node_start', 'data': 'generate'})
+        if stream_callback:
+            await stream_callback({'type': 'node_start', 'data': 'generate'})
 
         # Langfuse: Create generation for LLM call
         langfuse = get_langfuse_client()
@@ -340,7 +358,7 @@ class ChatAgent:
             **tool_params
         )
 
-        llm_output_buffer, tool_calls_buffer, usage = await self._stream_response(stream, self.stream_callback, messages)
+        llm_output_buffer, tool_calls_buffer, usage = await self._stream_response(stream, stream_callback, messages)
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
 
@@ -382,7 +400,8 @@ class ChatAgent:
             "tool_calls_names": [tc["name"] for tc in tool_calls] if tool_calls else [],
             "next_step": "→ should_continue decision"
         })
-        await self.stream_callback({'type': 'node_end', 'data': 'generate'})
+        if stream_callback:
+            await stream_callback({'type': 'node_end', 'data': 'generate'})
         return {"messages": state.get("messages", []) + [response]}
 
     def _build_graph(self) -> StateGraph:
@@ -571,6 +590,20 @@ class ChatAgent:
 
             config_obj = self.config_manager.read_config()
 
+            # 为每个查询创建独立的回调函数，避免并发冲突
+            # 使用 contextvars 实现每个协程的回调隔离
+            token_q: asyncio.Queue[Any] = asyncio.Queue()
+            
+            # 创建局部回调函数，只引用局部变量 token_q
+            async def local_stream_callback(event: Dict[str, Any]) -> None:
+                await self._queue_writer(event, token_q)
+            
+            # 使用局部变量 last_state，避免并发冲突
+            local_last_state = None
+            
+            # 设置 context variable，让 generate 和 tool_node 可以获取到
+            token = _stream_callback_var.set(local_stream_callback)
+            
             initial_state = {
                 "iterations": 0,
                 "chat_id": chat_id,
@@ -578,12 +611,13 @@ class ChatAgent:
                 "image_data": image_data if image_data else None,
                 "process_image_used": False
             }
-            
+
 
             model_name = self.config_manager.get_selected_model()
             if self.current_model != model_name:
                 self.set_current_model(model_name)
 
+            
             logger.debug({
                 "message": "GRAPH: LAUNCHING EXECUTION",
                 "chat_id": chat_id,
@@ -593,10 +627,10 @@ class ChatAgent:
                 }
             })
 
-            self.last_state = None
-            token_q: asyncio.Queue[Any] = asyncio.Queue()
-            self.stream_callback = lambda event: self._queue_writer(event, token_q)
-            runner = asyncio.create_task(self._run_graph(initial_state, config, chat_id, token_q))
+            # 创建运行图的任务，传入局部回调和状态
+            runner = asyncio.create_task(
+                self._run_graph(initial_state, config, chat_id, token_q)
+            )
 
             try:
                 while True:
@@ -607,13 +641,16 @@ class ChatAgent:
             except Exception as stream_error:
                 logger.error({"message": "Error in streaming", "error": str(stream_error)}, exc_info=True)
             finally:
+                # 清除 context variable
+                _stream_callback_var.reset(token)
+                
                 with contextlib.suppress(asyncio.CancelledError):
                     await runner
 
                 logger.debug({
                     "message": "GRAPH: EXECUTION COMPLETED",
                     "chat_id": chat_id,
-                    "final_iterations": self.last_state.get("iterations", 0) if self.last_state else 0
+                    "final_iterations": local_last_state.get("iterations", 0) if local_last_state else 0
                 })
 
         except Exception as e:
@@ -633,7 +670,13 @@ class ChatAgent:
         """
         await token_q.put(event)
 
-    async def _run_graph(self, initial_state: Dict[str, Any], config: Dict[str, Any], chat_id: str, token_q: asyncio.Queue) -> None:
+    async def _run_graph(
+        self, 
+        initial_state: Dict[str, Any], 
+        config: Dict[str, Any], 
+        chat_id: str, 
+        token_q: asyncio.Queue
+    ) -> None:
         """Run the graph execution in background task.
         
         Args:
@@ -642,21 +685,25 @@ class ChatAgent:
             chat_id: Chat identifier
             token_q: Queue for streaming events
         """
+        # 使用局部变量存储状态，避免并发冲突
+        local_last_state = None
+        stream_callback = self._get_stream_callback()
+        
         try:
             async for final_state in self.graph.astream(
                 initial_state,
                 config=config,
                 stream_mode="values",
-                stream_writer=lambda event: self._queue_writer(event, token_q)
+                stream_writer=lambda event: self._queue_writer(event, token_q) if stream_callback is None else stream_callback(event)
             ):
-                self.last_state = final_state
+                local_last_state = final_state
         finally:
             try:
-                if self.last_state and self.last_state.get("messages"):
-                    final_msg = self.last_state["messages"][-1]
+                if local_last_state and local_last_state.get("messages"):
+                    final_msg = local_last_state["messages"][-1]
                     try:
                         logger.debug(f'Saving messages to conversation store for chat: {chat_id}')
-                        await self.conversation_store.save_messages(chat_id, self.last_state["messages"])
+                        await self.conversation_store.save_messages(chat_id, local_last_state["messages"])
                     except Exception as save_err:
                         logger.warning({"message": "Failed to persist conversation", "chat_id": chat_id, "error": str(save_err)})
 

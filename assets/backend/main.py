@@ -24,12 +24,13 @@ This module provides the main HTTP API endpoints and WebSocket connections for:
 - Vector store operations
 """
 
+import asyncio
 import base64
 import json
 import os
 import uuid
 from contextlib import asynccontextmanager
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -64,6 +65,12 @@ vector_store._initialize_store()
 
 agent: ChatAgent | None = None
 indexing_tasks: Dict[str, str] = {}
+
+# 并发连接管理
+# active_connections: Dict[chat_id, Set[WebSocket]] - 每个 chat_id 可能多个连接
+# connection_tasks: Dict[chat_id, asyncio.Task] - 每个 chat_id 的处理任务
+active_connections: Dict[str, Set[WebSocket]] = {}
+connection_tasks: Dict[str, asyncio.Task] = {}
 
 
 @asynccontextmanager
@@ -111,19 +118,14 @@ app.add_middleware(
 )
 
 
-@app.websocket("/ws/chat/{chat_id}")
-async def websocket_endpoint(websocket: WebSocket, chat_id: str):
-    """WebSocket endpoint for real-time chat communication.
+async def handle_chat_messages(websocket: WebSocket, chat_id: str):
+    """处理单个 chat_id 的消息，独立运行不阻塞其他连接。
     
-    Args:
-        websocket: WebSocket connection
-        chat_id: Unique chat identifier
+    每个 WebSocket 连接创建一个独立的任务来执行查询，
+    这样多个用户可以同时向不同的 chat_id 发送消息。
     """
-    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
     try:
-        await websocket.accept()
-        logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
-        
+        # 发送历史消息
         history_messages = await postgres_storage.get_messages(chat_id)
         history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(history_messages) if i != 0]
         await websocket.send_json({"type": "history", "messages": history})
@@ -140,12 +142,13 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
                 logger.debug(f"Retrieved image data for image_id: {image_id}, data length: {len(image_data) if image_data else 0}")
             
             try:
+                # agent.query 是异步生成器，可以并发执行
                 async for event in agent.query(query_text=new_message, chat_id=chat_id, image_data=image_data):
                     await websocket.send_json(event)
             except Exception as query_error:
                 logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
                 await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
-        
+            
             final_messages = await postgres_storage.get_messages(chat_id)
             final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
             await websocket.send_json({"type": "history", "messages": final_history})
@@ -153,7 +156,55 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
     except WebSocketDisconnect:
         logger.debug(f"Client disconnected from chat {chat_id}")
     except Exception as e:
+        logger.error(f"Error in chat handler for {chat_id}: {str(e)}", exc_info=True)
+    finally:
+        # 清理连接
+        if chat_id in active_connections:
+            active_connections[chat_id].discard(websocket)
+            if not active_connections[chat_id]:
+                del active_connections[chat_id]
+
+
+@app.websocket("/ws/chat/{chat_id}")
+async def websocket_endpoint(websocket: WebSocket, chat_id: str):
+    """WebSocket endpoint for real-time chat communication.
+    
+    支持真正的并发处理：
+    - 每个 chat_id 的消息处理作为独立 asyncio.Task
+    - 多个用户可以同时向不同的 chat_id 发送消息
+    - llama.cpp 层面通过 --parallel 和 --cont-batching 支持真正的并发推理
+    
+    Args:
+        websocket: WebSocket connection
+        chat_id: Unique chat identifier
+    """
+    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
+    try:
+        await websocket.accept()
+        logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
+        
+        # 注册连接
+        if chat_id not in active_connections:
+            active_connections[chat_id] = set()
+        active_connections[chat_id].add(websocket)
+        
+        # 启动独立任务处理此连接的消息
+        # 不再使用串行 while True，而是为每个连接创建独立任务
+        task = asyncio.create_task(handle_chat_messages(websocket, chat_id))
+        
+        # 等待任务完成（连接断开）
+        await task
+        
+    except WebSocketDisconnect:
+        logger.debug(f"Client disconnected from chat {chat_id}")
+    except Exception as e:
         logger.error(f"WebSocket error for chat {chat_id}: {str(e)}", exc_info=True)
+    finally:
+        # 清理
+        if chat_id in active_connections:
+            active_connections[chat_id].discard(websocket)
+            if not active_connections[chat_id]:
+                del active_connections[chat_id]
 
 
 @app.post("/upload-image")
