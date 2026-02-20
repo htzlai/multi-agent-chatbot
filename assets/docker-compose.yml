@@ -26,11 +26,13 @@ services:
       - ./backend:/app
       - backend_uploads:/app/uploads
     depends_on:
-      - postgres
-      - etcd
-      - minio
+      postgres:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
     restart: unless-stopped
     environment:
+      - TZ=Asia/Shanghai
       - POSTGRES_HOST=postgres
       - POSTGRES_DB=chatbot
       - POSTGRES_USER=chatbot_user
@@ -49,7 +51,7 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - /frontend:/app/frontend
+      - ./frontend:/app
       - /app/node_modules
     depends_on:
       - backend
