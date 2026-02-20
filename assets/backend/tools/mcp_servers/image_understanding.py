@@ -58,7 +58,8 @@ postgres_storage = PostgreSQLConversationStorage(
     port=POSTGRES_PORT,
     database=POSTGRES_DB,
     user=POSTGRES_USER,
-    password=POSTGRES_PASSWORD
+    password=POSTGRES_PASSWORD,
+    cache_ttl=21600  # 6小时
 )
 
 @mcp.tool()

@@ -56,7 +56,8 @@ postgres_storage = PostgreSQLConversationStorage(
     port=POSTGRES_PORT,
     database=POSTGRES_DB,
     user=POSTGRES_USER,
-    password=POSTGRES_PASSWORD
+    password=POSTGRES_PASSWORD,
+    cache_ttl=21600  # 6小时 = 6 * 60 * 60 秒
 )
 
 vector_store = create_vector_store_with_config(config_manager)
