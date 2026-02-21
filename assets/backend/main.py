@@ -678,13 +678,10 @@ async def test_vector_stats():
         collection = Collection("context")
         collection.load()
 
-        # Get total entities
         total_entities = collection.num_entities
 
-        # Get index info
         indexes = collection.indexes
 
-        # Get schema fields
         schema = collection.schema
         fields = [{"name": f.name, "type": str(f.dtype)} for f in schema.fields]
 
@@ -696,6 +693,146 @@ async def test_vector_stats():
         }
     except Exception as e:
         return {"error": str(e)}
+
+
+# ============================================================
+# RAG Admin API - 管理员功能
+# ============================================================
+
+@app.get("/admin/rag/stats")
+async def get_rag_stats():
+    """Get comprehensive RAG system statistics."""
+    import json
+    from tools.mcp_servers.rag import search_documents
+
+    # Get vector stats
+    from pymilvus import connections, Collection
+    connections.connect(uri="http://milvus:19530")
+    collection = Collection("context")
+    collection.load()
+
+    # Get sources
+    config_obj = config_manager.read_config()
+    all_sources = config_obj.sources or []
+    selected_sources = config_obj.selected_sources or []
+
+    # Get conversations count
+    chat_ids = await postgres_storage.list_conversations()
+
+    return {
+        "vector_store": {
+            "collection": "context",
+            "total_entities": collection.num_entities,
+            "index_count": len(collection.indexes),
+            "fields": [f.name for f in collection.schema.fields]
+        },
+        "documents": {
+            "total_count": len(all_sources),
+            "selected_count": len(selected_sources),
+            "unselected_count": len(all_sources) - len(selected_sources)
+        },
+        "conversations": {
+            "total_count": len(chat_ids)
+        }
+    }
+
+
+@app.get("/admin/rag/sources")
+async def get_rag_sources():
+    """Get all sources with selection status."""
+    config_obj = config_manager.read_config()
+    all_sources = config_obj.sources or []
+    selected_sources = config_obj.selected_sources or []
+
+    sources_detail = []
+    for src in all_sources:
+        sources_detail.append({
+            "name": src,
+            "selected": src in selected_sources
+        })
+
+    return {
+        "sources": sources_detail,
+        "total_count": len(all_sources),
+        "selected_count": len(selected_sources)
+    }
+
+
+@app.post("/admin/rag/sources/select")
+async def select_sources(request: dict):
+    """Select sources for RAG retrieval."""
+    sources = request.get("sources", [])
+
+    config_obj = config_manager.read_config()
+    config_manager.updated_selected_sources(sources)
+
+    return {
+        "status": "success",
+        "selected_count": len(sources),
+        "sources": sources
+    }
+
+
+@app.post("/admin/rag/sources/select-all")
+async def select_all_sources():
+    """Select all sources for RAG retrieval."""
+    config_obj = config_manager.read_config()
+    all_sources = config_obj.sources or []
+
+    config_manager.updated_selected_sources(all_sources)
+
+    return {
+        "status": "success",
+        "selected_count": len(all_sources),
+        "message": f"Selected all {len(all_sources)} sources"
+    }
+
+
+@app.post("/admin/rag/sources/deselect-all")
+async def deselect_all_sources():
+    """Deselect all sources."""
+    config_manager.updated_selected_sources([])
+
+    return {
+        "status": "success",
+        "selected_count": 0,
+        "message": "Deselected all sources"
+    }
+
+
+@app.get("/admin/conversations")
+async def get_all_conversations():
+    """Get all conversations with metadata."""
+    chat_ids = await postgres_storage.list_conversations()
+
+    conversations = []
+    for chat_id in chat_ids:
+        metadata = await postgres_storage.get_chat_metadata(chat_id)
+        messages = await postgres_storage.get_messages(chat_id, limit=1)
+
+        conversations.append({
+            "chat_id": chat_id,
+            "name": metadata.get("name", f"Chat {chat_id[:8]}") if metadata else f"Chat {chat_id[:8]}",
+            "message_count": len(messages),
+            "created_at": metadata.get("created_at") if metadata else None
+        })
+
+    return {"conversations": conversations, "total_count": len(conversations)}
+
+
+@app.get("/admin/conversations/{chat_id}/messages")
+async def get_conversation_messages(chat_id: str, limit: int = 100):
+    """Get messages for a specific conversation."""
+    messages = await postgres_storage.get_messages(chat_id, limit=limit)
+
+    message_list = []
+    for msg in messages:
+        message_list.append({
+            "type": type(msg).__name__,
+            "content": msg.content if hasattr(msg, 'content') else str(msg)
+        })
+
+    return {"chat_id": chat_id, "messages": message_list, "count": len(message_list)}
 
 
 if __name__ == "__main__":
