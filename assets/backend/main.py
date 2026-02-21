@@ -32,7 +32,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Set
 
-from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from agent import ChatAgent
@@ -42,6 +42,8 @@ from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest
 from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
+
+AUTH_ENABLED = os.getenv("SUPABASE_JWT_SECRET") is not None
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
@@ -124,7 +126,11 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
     
     每个 WebSocket 连接创建一个独立的任务来执行查询，
     这样多个用户可以同时向不同的 chat_id 发送消息。
+    
+    支持 stop 消息中断生成。
     """
+    stop_event = asyncio.Event()
+    
     try:
         # 发送历史消息
         history_messages = await postgres_storage.get_messages(chat_id)
@@ -134,22 +140,45 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
         while True:
             data = await websocket.receive_text()
             client_message = json.loads(data)
+            
+            # Handle stop message - interrupt ongoing generation
+            if client_message.get("type") == "stop":
+                stop_event.set()
+                logger.debug(f"Stop requested for chat {chat_id}")
+                await websocket.send_json({"type": "stopped", "message": "Generation stopped"})
+                continue
+            
             new_message = client_message.get("message")
             image_id = client_message.get("image_id")
+            
+            if not new_message:
+                continue
             
             image_data = None
             if image_id:
                 image_data = await postgres_storage.get_image(image_id)
                 logger.debug(f"Retrieved image data for image_id: {image_id}, data length: {len(image_data) if image_data else 0}")
             
+            # Reset stop event for new query
+            stop_event.clear()
+            
             try:
-                # agent.query 是异步生成器，可以并发执行
-                async for event in agent.query(query_text=new_message, chat_id=chat_id, image_data=image_data):
+                # agent.query 是异步生成器，支持 stop 事件中断
+                async for event in agent.query(
+                    query_text=new_message, 
+                    chat_id=chat_id, 
+                    image_data=image_data,
+                    stop_event=stop_event
+                ):
+                    if stop_event.is_set():
+                        logger.debug(f"Generation stopped for chat {chat_id}")
+                        break
                     await websocket.send_json(event)
             except Exception as query_error:
                 logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
                 await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
             
+            # Send final history after query completes or is stopped
             final_messages = await postgres_storage.get_messages(chat_id)
             final_history = [postgres_storage._message_to_dict(msg) for i, msg in enumerate(final_messages) if i != 0]
             await websocket.send_json({"type": "history", "messages": final_history})
@@ -167,7 +196,11 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
 
 
 @app.websocket("/ws/chat/{chat_id}")
-async def websocket_endpoint(websocket: WebSocket, chat_id: str):
+async def websocket_endpoint(
+    websocket: WebSocket, 
+    chat_id: str,
+    token: Optional[str] = Query(None)
+):
     """WebSocket endpoint for real-time chat communication.
     
     支持真正的并发处理：
@@ -178,7 +211,20 @@ async def websocket_endpoint(websocket: WebSocket, chat_id: str):
     Args:
         websocket: WebSocket connection
         chat_id: Unique chat identifier
+        token: Optional JWT token for authentication (required if AUTH_ENABLED)
     """
+    if AUTH_ENABLED:
+        try:
+            from auth import verify_token
+            if not token:
+                await websocket.close(code=4001, reason="Authentication required")
+                return
+            user = verify_token(token)
+            logger.debug(f"WebSocket authenticated for user: {user.get('sub')}")
+        except Exception as e:
+            await websocket.close(code=4001, reason=f"Authentication failed: {str(e)}")
+            return
+    
     logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
     try:
         await websocket.accept()
