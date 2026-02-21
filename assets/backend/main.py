@@ -127,9 +127,10 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
     每个 WebSocket 连接创建一个独立的任务来执行查询，
     这样多个用户可以同时向不同的 chat_id 发送消息。
     
-    支持 stop 消息中断生成。
+    支持 stop 消息中断生成，以及 WebSocket 断开时的资源清理。
     """
     stop_event = asyncio.Event()
+    current_query_task = None
     
     try:
         # 发送历史消息
@@ -144,8 +145,18 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
             # Handle stop message - interrupt ongoing generation
             if client_message.get("type") == "stop":
                 stop_event.set()
-                logger.debug(f"Stop requested for chat {chat_id}")
+                logger.info(f"Stop requested for chat {chat_id}")
+                
+                # 如果有正在运行的任务，取消它
+                if current_query_task and not current_query_task.done():
+                    current_query_task.cancel()
+                    try:
+                        await current_query_task
+                    except asyncio.CancelledError:
+                        pass
+                
                 await websocket.send_json({"type": "stopped", "message": "Generation stopped"})
+                stop_event.clear()  # 重置以备下次查询
                 continue
             
             new_message = client_message.get("message")
@@ -162,21 +173,34 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
             # Reset stop event for new query
             stop_event.clear()
             
+            async def run_query():
+                """在独立任务中运行查询"""
+                try:
+                    async for event in agent.query(
+                        query_text=new_message, 
+                        chat_id=chat_id, 
+                        image_data=image_data,
+                        stop_event=stop_event
+                    ):
+                        if stop_event.is_set():
+                            logger.debug(f"Generation stopped for chat {chat_id}")
+                            return
+                        await websocket.send_json(event)
+                except asyncio.CancelledError:
+                    logger.debug(f"Query task cancelled for chat {chat_id}")
+                    raise
+                except Exception as query_error:
+                    logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
+                    await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
+            
             try:
-                # agent.query 是异步生成器，支持 stop 事件中断
-                async for event in agent.query(
-                    query_text=new_message, 
-                    chat_id=chat_id, 
-                    image_data=image_data,
-                    stop_event=stop_event
-                ):
-                    if stop_event.is_set():
-                        logger.debug(f"Generation stopped for chat {chat_id}")
-                        break
-                    await websocket.send_json(event)
-            except Exception as query_error:
-                logger.error(f"Error in agent.query: {str(query_error)}", exc_info=True)
-                await websocket.send_json({"type": "error", "content": f"Error processing request: {str(query_error)}"})
+                # 创建任务来运行查询
+                current_query_task = asyncio.create_task(run_query())
+                await current_query_task
+            except asyncio.CancelledError:
+                logger.info(f"Query was cancelled for chat {chat_id}")
+            finally:
+                current_query_task = None
             
             # Send final history after query completes or is stopped
             final_messages = await postgres_storage.get_messages(chat_id)
@@ -184,10 +208,23 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
             await websocket.send_json({"type": "history", "messages": final_history})
             
     except WebSocketDisconnect:
-        logger.debug(f"Client disconnected from chat {chat_id}")
+        logger.info(f"Client disconnected from chat {chat_id}")
+        # 设置 stop_event 以停止任何正在进行的生成
+        stop_event.set()
+        # 取消正在运行的任务
+        if current_query_task and not current_query_task.done():
+            current_query_task.cancel()
+            try:
+                await current_query_task
+            except asyncio.CancelledError:
+                pass
     except Exception as e:
         logger.error(f"Error in chat handler for {chat_id}: {str(e)}", exc_info=True)
     finally:
+        # 确保清理
+        stop_event.set()
+        if current_query_task and not current_query_task.done():
+            current_query_task.cancel()
         # 清理连接
         if chat_id in active_connections:
             active_connections[chat_id].discard(websocket)

@@ -21,6 +21,7 @@ import contextlib
 import json
 from typing import AsyncIterator, List, Dict, Any, TypedDict, Optional, Callable, Awaitable
 
+import httpx
 from langchain_core.messages import HumanMessage, AIMessage, AnyMessage, SystemMessage, ToolMessage, ToolCall
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langgraph.checkpoint.memory import MemorySaver
@@ -163,9 +164,24 @@ class ChatAgent:
             if model_name in available_models:
                 self.current_model = model_name
                 logger.info(f"Switched to model: {model_name}")
+                # 创建支持请求取消的自定义 httpx 客户端
+                # 使用较长的超时以支持大模型推理，同时允许主动取消
+                self._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        connect=30.0,      # 连接超时 30 秒
+                        read=300.0,        # 读取超时 5 分钟（大模型可能需要较长时间）
+                        write=30.0,        # 写入超时 30 秒
+                        pool=30.0          # 连接池超时 30 秒
+                    ),
+                    limits=httpx.Limits(
+                        max_connections=10,
+                        max_keepalive_connections=5
+                    )
+                )
                 self.model_client = AsyncOpenAI(
                     base_url=f"http://{self.current_model}:8000/v1",
-                    api_key="api_key"
+                    api_key="api_key",
+                    http_client=self._http_client  # 使用自定义客户端
                 )
             else:
                 raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
@@ -340,7 +356,12 @@ class ChatAgent:
             **tool_params
         )
 
-        llm_output_buffer, tool_calls_buffer = await self._stream_response(stream, self.stream_callback)
+        # 传递 stop_event 给流处理方法
+        llm_output_buffer, tool_calls_buffer = await self._stream_response(
+            stream, 
+            self.stream_callback,
+            stop_event=getattr(self, '_stop_event', None)
+        )
         tool_calls = self._format_tool_calls(tool_calls_buffer)
         raw_output = "".join(llm_output_buffer)
         
@@ -446,12 +467,13 @@ class ChatAgent:
             )
         return tool_calls
 
-    async def _stream_response(self, stream, stream_callback: StreamCallback) -> tuple[List[str], Dict[int, Dict[str, str]]]:
+    async def _stream_response(self, stream, stream_callback: StreamCallback, stop_event: asyncio.Event = None) -> tuple[List[str], Dict[int, Dict[str, str]]]:
         """Process streaming LLM response and extract content and tool calls.
         
         Args:
             stream: Async stream from LLM
             stream_callback: Callback for streaming events
+            stop_event: Optional event to signal stream interruption
             
         Returns:
             Tuple of (content_buffer, tool_calls_buffer)
@@ -460,41 +482,86 @@ class ChatAgent:
         tool_calls_buffer = {}
         saw_tool_finish = False
 
-        async for chunk in stream:
-            for choice in getattr(chunk, "choices", []) or []:
-                delta = getattr(choice, "delta", None)
-                if not delta:
-                    continue
-
-                content = getattr(delta, "content", None)
-                if content:
-                    await stream_callback({"type": "token", "data": content})
-                    llm_output_buffer.append(content)
-                for tc in getattr(delta, "tool_calls", []) or []:
-                    idx = getattr(tc, "index", None)
-                    if idx is None:
-                        idx = 0 if not tool_calls_buffer else max(tool_calls_buffer) + 1
-                    entry = tool_calls_buffer.setdefault(idx, {"id": None, "name": None, "arguments": ""})
-
-                    if getattr(tc, "id", None):
-                        entry["id"] = tc.id
-
-                    fn = getattr(tc, "function", None)
-                    if fn:
-                        if getattr(fn, "name", None):
-                            entry["name"] = fn.name
-                        if getattr(fn, "arguments", None):
-                            entry["arguments"] += fn.arguments
-
-                finish_reason = getattr(choice, "finish_reason", None)
-                if finish_reason == "tool_calls":
-                    saw_tool_finish = True
+        try:
+            async for chunk in stream:
+                # 检查是否需要中断生成
+                if stop_event and stop_event.is_set():
+                    logger.info("Stream interrupted by stop_event, closing connection")
+                    # 主动关闭底层 HTTP 连接
+                    await self._close_stream_connection(stream)
                     break
-                    
-            if saw_tool_finish:
-                break
+
+                for choice in getattr(chunk, "choices", []) or []:
+                    delta = getattr(choice, "delta", None)
+                    if not delta:
+                        continue
+
+                    content = getattr(delta, "content", None)
+                    if content:
+                        await stream_callback({"type": "token", "data": content})
+                        llm_output_buffer.append(content)
+                    for tc in getattr(delta, "tool_calls", []) or []:
+                        idx = getattr(tc, "index", None)
+                        if idx is None:
+                            idx = 0 if not tool_calls_buffer else max(tool_calls_buffer) + 1
+                        entry = tool_calls_buffer.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+
+                        if getattr(tc, "id", None):
+                            entry["id"] = tc.id
+
+                        fn = getattr(tc, "function", None)
+                        if fn:
+                            if getattr(fn, "name", None):
+                                entry["name"] = fn.name
+                            if getattr(fn, "arguments", None):
+                                entry["arguments"] += fn.arguments
+
+                    finish_reason = getattr(choice, "finish_reason", None)
+                    if finish_reason == "tool_calls":
+                        saw_tool_finish = True
+                        break
+                        
+                if saw_tool_finish:
+                    break
+
+        except asyncio.CancelledError:
+            logger.info("Stream cancelled by asyncio, cleaning up")
+            await self._close_stream_connection(stream)
+            raise
+        except Exception as e:
+            logger.error(f"Error in stream processing: {e}", exc_info=True)
+            raise
 
         return llm_output_buffer, tool_calls_buffer
+
+    async def _close_stream_connection(self, stream) -> None:
+        """Close the underlying HTTP connection of a stream.
+        
+        Args:
+            stream: The stream object to close
+        """
+        try:
+            # OpenAI SDK 的流对象内部有 _client_response 属性
+            if hasattr(stream, '_client_response'):
+                response = stream._client_response
+                if hasattr(response, 'aclose'):
+                    await response.aclose()
+                    logger.debug("Closed stream client response")
+            # 尝试关闭 httpx Response
+            if hasattr(stream, 'response'):
+                response = stream.response
+                if hasattr(response, 'aclose'):
+                    await response.aclose()
+                    logger.debug("Closed stream response")
+            # 尝试关闭 stream 本身
+            if hasattr(stream, 'close'):
+                if asyncio.iscoroutinefunction(stream.close):
+                    await stream.close()
+                else:
+                    stream.close()
+                logger.debug("Closed stream directly")
+        except Exception as e:
+            logger.warning(f"Error closing stream connection: {e}")
 
     async def query(self, query_text: str, chat_id: str, image_data: str = None, stop_event=None) -> AsyncIterator[Dict[str, Any]]:
         """Process user query and stream response tokens.
@@ -502,6 +569,7 @@ class ChatAgent:
         Args:
             query_text: User's input text
             chat_id: Unique chat identifier
+            stop_event: Optional event to signal generation interruption
             
         Yields:
             Streaming events and tokens
@@ -512,6 +580,9 @@ class ChatAgent:
             "query": query_text[:100] + "..." if len(query_text) > 100 else query_text,
             "graph_flow": "START → generate → should_continue → action → generate → END"
         })
+
+        # 存储 stop_event 供 generate 方法使用
+        self._stop_event = stop_event
 
         config = {"configurable": {"thread_id": chat_id}}
 
@@ -575,13 +646,39 @@ class ChatAgent:
 
             try:
                 while True:
-                    item = await token_q.get()
+                    # 检查是否需要停止生成
+                    if stop_event and stop_event.is_set():
+                        logger.info(f"Stop event detected, cancelling runner for chat {chat_id}")
+                        runner.cancel()
+                        try:
+                            await runner
+                        except asyncio.CancelledError:
+                            pass
+                        yield {"type": "stopped", "message": "Generation stopped"}
+                        break
+                    
+                    # 使用 wait_for 来同时等待队列和检查 stop_event
+                    try:
+                        item = await asyncio.wait_for(token_q.get(), timeout=0.1)
+                    except asyncio.TimeoutError:
+                        continue
+                        
                     if item is SENTINEL:
                         break
                     yield item
+            except asyncio.CancelledError:
+                logger.info(f"Query cancelled for chat {chat_id}")
+                runner.cancel()
+                try:
+                    await runner
+                except asyncio.CancelledError:
+                    pass
+                raise
             except Exception as stream_error:
                 logger.error({"message": "Error in streaming", "error": str(stream_error)}, exc_info=True)
             finally:
+                # 清理 stop_event 引用
+                self._stop_event = None
                 with contextlib.suppress(asyncio.CancelledError):
                     await runner
 
