@@ -632,7 +632,7 @@ async def clear_all_chats():
 @app.delete("/collections/{collection_name}")
 async def delete_collection(collection_name: str):
     """Delete a document collection from the vector store.
-    
+
     Args:
         collection_name: Name of the collection to delete
     """
@@ -644,6 +644,58 @@ async def delete_collection(collection_name: str):
             raise HTTPException(status_code=404, detail=f"Collection '{collection_name}' not found or could not be deleted")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting collection: {str(e)}")
+
+
+# ============================================================
+# RAG Test Endpoints - For debugging and verification
+# ============================================================
+
+@app.get("/test/rag")
+async def test_rag_search(query: str, k: int = 8):
+    """Test RAG retrieval with enhanced metadata.
+
+    Args:
+        query: Search query
+        k: Number of documents to retrieve
+    """
+    import json
+    from tools.mcp_servers.rag import search_documents
+
+    result = await search_documents(query)
+    result_data = json.loads(result)
+
+    return result_data
+
+
+@app.get("/test/vector-stats")
+async def test_vector_stats():
+    """Get vector store statistics."""
+    from pymilvus import connections, Collection
+
+    connections.connect(uri="http://milvus:19530")
+
+    try:
+        collection = Collection("context")
+        collection.load()
+
+        # Get total entities
+        total_entities = collection.num_entities
+
+        # Get index info
+        indexes = collection.indexes
+
+        # Get schema fields
+        schema = collection.schema
+        fields = [{"name": f.name, "type": str(f.dtype)} for f in schema.fields]
+
+        return {
+            "collection": "context",
+            "total_entities": total_entities,
+            "fields": fields,
+            "index_count": len(indexes)
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 if __name__ == "__main__":
