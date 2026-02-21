@@ -59,17 +59,19 @@ logger = logging.getLogger(__name__)
 
 class RAGState(TypedDict, total=False):
     """Type definition for the simplified RAG agent state.
-    
+
     Attributes:
         question: The user's question to be answered.
         messages: Conversation history with automatic message aggregation.
         context: Retrieved documents from the local vector store.
         sources: Optional list of source filters for retrieval.
+        scores: Optional list of similarity scores for retrieved documents.
     """
     question: str
     messages: Annotated[Sequence[AnyMessage], add_messages]
     context: Optional[List[Document]]
     sources: Optional[List[str]]
+    scores: Optional[List[float]]
 
 
 class RAGAgent:
@@ -115,28 +117,59 @@ class RAGAgent:
         """
 
     def retrieve(self, state: RAGState) -> Dict:
-        """Retrieve relevant documents from the vector store."""
+        """Retrieve relevant documents from the vector store with similarity scores."""
         logger.info({"message": "Starting document retrieval"})
         sources = state.get("sources", [])
-        
+        k = state.get("k", 8)  # Allow configurable k
+
+        # Use similarity search with scores
         if sources:
             logger.info({"message": "Attempting retrieval with source filters", "sources": sources})
-            retrieved_docs = self.vector_store.get_documents(state["question"], sources=sources)
+            retrieved_docs, scores = self.vector_store.get_documents_with_scores(
+                state["question"],
+                k=k,
+                sources=sources
+            )
         else:
             logger.info({"message": "No sources specified, searching all documents"})
-            retrieved_docs = self.vector_store.get_documents(state["question"])
-        
+            retrieved_docs, scores = self.vector_store.get_documents_with_scores(
+                state["question"],
+                k=k
+            )
+
+        # Fallback: if no results with filtering, try without filters
         if not retrieved_docs and sources:
             logger.info({"message": "No documents found with source filtering, trying without filters"})
-            retrieved_docs = self.vector_store.get_documents(state["question"])
-        
+            retrieved_docs, scores = self.vector_store.get_documents_with_scores(
+                state["question"],
+                k=k
+            )
+
+        # Analyze retrieval results
         if retrieved_docs:
-            sources_found = set(doc.metadata.get("source", "unknown") for doc in retrieved_docs)
-            logger.info({"message": "Document sources found", "sources": list(sources_found), "doc_count": len(retrieved_docs)})
+            # Get unique sources and their chunk counts
+            source_counts = {}
+            for doc in retrieved_docs:
+                source = doc.metadata.get("source", "unknown")
+                source_counts[source] = source_counts.get(source, 0) + 1
+
+            sources_found = list(source_counts.keys())
+            logger.info({
+                "message": "Document sources found",
+                "sources": sources_found,
+                "doc_count": len(retrieved_docs),
+                "source_distribution": source_counts,
+                "score_range": [min(scores), max(scores)] if scores else []
+            })
         else:
-            logger.warning({"message": "No documents retrieved", "query": state["question"], "attempted_sources": sources})
-            
-        return {"context": retrieved_docs}
+            logger.warning({
+                "message": "No documents retrieved",
+                "query": state["question"],
+                "attempted_sources": sources
+            })
+            scores = []
+
+        return {"context": retrieved_docs, "scores": scores}
 
 
     async def generate(self, state: RAGState) -> Dict:
@@ -212,22 +245,49 @@ vector_store = create_vector_store_with_config(rag_agent.config_manager)
 @mcp.tool()
 async def search_documents(query: str) -> str:
     """Search documents uploaded by the user to generate fast, grounded answers.
-    
+
     Performs a simple RAG pipeline that retrieves relevant documents and generates answers.
-    
+
     Args:
         query: The question or query to search for.
-        
+
     Returns:
-        A JSON string with the answer and sources: {"answer": "...", "sources": [{"name": "file.pdf", "excerpt": "..."}]}
+        A JSON string with the answer, sources, and retrieval metadata:
+        {
+            "answer": "...",
+            "sources": [
+                {
+                    "name": "file.pdf",
+                    "chunk_count": 3,
+                    "max_score": 0.85,
+                    "avg_score": 0.72,
+                    "chunks": [
+                        {"excerpt": "...", "score": 0.85, "text_length": 450},
+                        {"excerpt": "...", "score": 0.72, "text_length": 380},
+                        {"excerpt": "...", "score": 0.65, "text_length": 420}
+                    ]
+                }
+            ],
+            "retrieval_metadata": {
+                "total_chunks_retrieved": 8,
+                "unique_sources_count": 3,
+                "score_range": {"min": 0.45, "max": 0.85, "avg": 0.62},
+                "source_filter_applied": ["file1.pdf", "file2.pdf"],
+                "query": "..."
+            }
+        }
     """
     config_obj = rag_agent.config_manager.read_config()
     sources = config_obj.selected_sources or []
-    
+
+    # Allow configurable k (number of chunks to retrieve)
+    k = 8  # Default: retrieve top 8 chunks
+
     initial_state = {
         "question": query,
         "sources": sources,
-        "messages": []
+        "messages": [],
+        "k": k
     }
     
     thread_id = f"rag_session_{time.time()}"
@@ -251,25 +311,78 @@ async def search_documents(query: str) -> str:
             "sources": []
         })
     
-    # Extract sources from retrieved documents
+    # Extract sources from retrieved documents with detailed metadata
     sources_data = []
     context = result.get("context", [])
+    scores = result.get("scores", [])
+
+    # Build source distribution map
+    source_chunks = {}
     if context:
-        for doc in context:
+        for i, doc in enumerate(context):
             source_name = doc.metadata.get("source", "unknown")
-            excerpt = doc.page_content[:500] if doc.page_content else ""  # Limit excerpt length
-            # Avoid duplicate sources
-            if not any(s["name"] == source_name for s in sources_data):
-                sources_data.append({
+            score = scores[i] if i < len(scores) else doc.metadata.get("score", 0.0)
+
+            if source_name not in source_chunks:
+                source_chunks[source_name] = {
                     "name": source_name,
-                    "excerpt": excerpt
-                })
-    
-    logger.info({"message": "RAG result", "content_length": len(final_content), "query": query, "sources_count": len(sources_data)})
-    
+                    "chunks": [],
+                    "chunk_count": 0,
+                    "max_score": 0.0,
+                    "avg_score": 0.0
+                }
+
+            # Add chunk with score
+            chunk_info = {
+                "excerpt": doc.page_content[:500] if doc.page_content else "",
+                "score": round(score, 4),
+                "text_length": len(doc.page_content) if doc.page_content else 0
+            }
+            source_chunks[source_name]["chunks"].append(chunk_info)
+            source_chunks[source_name]["chunk_count"] += 1
+            source_chunks[source_name]["max_score"] = max(
+                source_chunks[source_name]["max_score"],
+                score
+            )
+
+        # Calculate average scores
+        for source_name, data in source_chunks.items():
+            if data["chunks"]:
+                data["avg_score"] = round(
+                    sum(c["score"] for c in data["chunks"]) / len(data["chunks"]),
+                    4
+                )
+            # Sort chunks by score descending
+            data["chunks"].sort(key=lambda x: x["score"], reverse=True)
+
+        sources_data = list(source_chunks.values())
+
+    # Build retrieval metadata
+    retrieval_metadata = {
+        "total_chunks_retrieved": len(context),
+        "unique_sources_count": len(sources_data),
+        "score_range": {
+            "min": round(min(scores), 4) if scores else None,
+            "max": round(max(scores), 4) if scores else None,
+            "avg": round(sum(scores) / len(scores), 4) if scores else None
+        },
+        "source_filter_applied": sources,
+        "query": query
+    }
+
+    logger.info({
+        "message": "RAG result with metadata",
+        "content_length": len(final_content),
+        "query": query,
+        "total_chunks": len(context),
+        "unique_sources": len(sources_data),
+        "scores": scores[:5] if scores else []
+    })
+
     return json.dumps({
         "answer": final_content,
-        "sources": sources_data
+        "sources": sources_data,
+        "retrieval_metadata": retrieval_metadata
     })
 
 

@@ -17,7 +17,7 @@
 import glob
 import json
 import uuid
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Any
 import os
 import shutil
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -384,6 +384,114 @@ class VectorStore:
                 "error": str(e)
             }, exc_info=True)
             return []
+
+    def get_documents_with_scores(self, query: str, k: int = 8, sources: List[str] = None) -> Tuple[List[Document], List[float]]:
+        """
+        Get relevant documents with similarity scores from Milvus.
+
+        Args:
+            query: The search query
+            k: Number of documents to retrieve
+            sources: Optional list of source names to filter by
+
+        Returns:
+            Tuple of (documents, scores) where scores are similarity scores
+        """
+        try:
+            from pymilvus import connections, Collection, DataType
+            import numpy as np
+
+            # Connect to Milvus
+            connections.connect(uri=self.uri)
+
+            collection = Collection(name=self.DEFAULT_COLLECTION_NAME)
+            collection.load()
+
+            # Generate query embedding
+            query_embedding = self.embeddings.embed_query(query)
+
+            # Build search parameters - detect metric type from index
+            # First, try to get metric type from collection schema
+            metric_type = "L2"  # Default fallback
+            try:
+                # Get index info to determine metric type
+                indexes = collection.indexes
+                if indexes and len(indexes) > 0:
+                    index_params = indexes[0]._index_params
+                    # Check for metric_type in params
+                    if "metric_type" in index_params:
+                        metric_type = index_params["metric_type"]
+                    elif "params" in index_params and isinstance(index_params["params"], dict):
+                        if "metric_type" in index_params["params"]:
+                            metric_type = index_params["params"]["metric_type"]
+            except Exception as e:
+                logger.debug({"message": "Could not detect metric type, using default", "error": str(e)})
+
+            search_params = {"metric_type": metric_type, "params": {}}
+
+            # Build filter expression if sources specified
+            filter_expr = None
+            if sources:
+                if len(sources) == 1:
+                    filter_expr = f'source == "{sources[0]}"'
+                else:
+                    source_conditions = [f'source == "{source}"' for source in sources]
+                    filter_expr = " || ".join(source_conditions)
+
+            logger.debug({
+                "message": "Searching with scores",
+                "query": query,
+                "k": k,
+                "filter": filter_expr
+            })
+
+            # Perform search
+            results = collection.search(
+                data=[query_embedding],
+                anns_field="vector",
+                param=search_params,
+                limit=k,
+                expr=filter_expr,
+                output_fields=["source", "text", "file_path", "filename"]
+            )
+
+            documents = []
+            scores = []
+
+            if results and len(results) > 0:
+                for hit in results[0]:
+                    # Get metadata
+                    metadata = {
+                        "source": hit.entity.get("source", "unknown"),
+                        "file_path": hit.entity.get("file_path", ""),
+                        "filename": hit.entity.get("filename", ""),
+                        "score": float(hit.distance)  # IP metric: higher is better
+                    }
+
+                    # Get text content
+                    text = hit.entity.get("text", "")
+
+                    doc = Document(
+                        page_content=text,
+                        metadata=metadata
+                    )
+                    documents.append(doc)
+                    scores.append(float(hit.distance))
+
+            logger.debug({
+                "message": "Retrieved documents with scores",
+                "document_count": len(documents),
+                "scores": scores[:5] if scores else []  # Log first 5 scores
+            })
+
+            return documents, scores
+
+        except Exception as e:
+            logger.error({
+                "message": "Error retrieving documents with scores",
+                "error": str(e)
+            }, exc_info=True)
+            return [], []
 
     def delete_by_source(self, source_name: str) -> bool:
         """Delete all vectors for a specific source from Milvus.
