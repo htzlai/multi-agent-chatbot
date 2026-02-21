@@ -130,6 +130,11 @@ services:
       - "-fa"
       - "1"
       - "--jinja"
+      # 新增：HTTP 超时和连接管理参数
+      - "--timeout"
+      - "60"          # HTTP 读写超时 60 秒，客户端断开后服务端会检测到
+      - "--threads-http"
+      - "4"           # HTTP 服务线程数，支持并发请求处理
 
   # deepseek-coder: (已禁用，如需启用请取消注释)
   #   <<: *build-base
