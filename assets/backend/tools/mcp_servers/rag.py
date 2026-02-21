@@ -219,7 +219,7 @@ async def search_documents(query: str) -> str:
         query: The question or query to search for.
         
     Returns:
-        A concise answer based on the retrieved documents.
+        A JSON string with the answer and sources: {"answer": "...", "sources": [{"name": "file.pdf", "excerpt": "..."}]}
     """
     config_obj = rag_agent.config_manager.read_config()
     sources = config_obj.selected_sources or []
@@ -236,17 +236,41 @@ async def search_documents(query: str) -> str:
     
     if not result.get("messages"):
         logger.error({"message": "No messages in RAG result", "query": query})
-        return "I apologize, but I encountered an error processing your query and no response was generated."
+        return json.dumps({
+            "answer": "I apologize, but I encountered an error processing your query and no response was generated.",
+            "sources": []
+        })
     
     final_message = result["messages"][-1]
     final_content = getattr(final_message, 'content', '') or ''
     
     if not final_content.strip():
         logger.warning({"message": "Empty content in final RAG message", "query": query, "message_type": type(final_message).__name__})
-        return f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question."
+        return json.dumps({
+            "answer": f"I found relevant documents for your query '{query}' but was unable to generate a response. Please try rephrasing your question.",
+            "sources": []
+        })
     
-    logger.info({"message": "RAG result", "content_length": len(final_content), "query": query})
-    return final_content
+    # Extract sources from retrieved documents
+    sources_data = []
+    context = result.get("context", [])
+    if context:
+        for doc in context:
+            source_name = doc.metadata.get("source", "unknown")
+            excerpt = doc.page_content[:500] if doc.page_content else ""  # Limit excerpt length
+            # Avoid duplicate sources
+            if not any(s["name"] == source_name for s in sources_data):
+                sources_data.append({
+                    "name": source_name,
+                    "excerpt": excerpt
+                })
+    
+    logger.info({"message": "RAG result", "content_length": len(final_content), "query": query, "sources_count": len(sources_data)})
+    
+    return json.dumps({
+        "answer": final_content,
+        "sources": sources_data
+    })
 
 
 if __name__ == "__main__":

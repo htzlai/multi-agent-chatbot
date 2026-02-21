@@ -40,12 +40,12 @@ services:
       - ETCD_ENDPOINTS=etcd:2379
       - MINIO_ADDRESS=minio:9000
       - MILVUS_ADDRESS=milvus:19530
-      - MODELS=gpt-oss-120b
+      - MODELS=gpt-oss-120b #,gpt-oss-20b
       - UPLOAD_DIR=/app/uploads
       # Langfuse 配置 (AI 可观测性)
-      - LANGFUSE_PUBLIC_KEY=pk-lf-451cd1a8-1394-4e52-9032-c7f2a86ebd19
-      - LANGFUSE_SECRET_KEY=sk-lf-77127993-f9ca-4f4d-9735-2cc03cb8cc4a
-      - LANGFUSE_BASE_URL=http://langfuse:3000
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-pk-lf-451cd1a8-1394-4e52-9032-c7f2a86ebd19}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-sk-lf-77127993-f9ca-4f4d-9735-2cc03cb8cc4a}
+      - LANGFUSE_BASE_URL=${LANGFUSE_BASE_URL:-http://langfuse:3000}
 
   frontend:
     container_name: frontend
@@ -134,10 +134,32 @@ services:
       - "etcd"
       - "minio"
 
+  # ============================================================
+  # Langfuse: LLM 可观测性 (可选，需配置 LANGFUSE_* 后 backend 才会上报)
+  # 端口: 3105 -> 3000 (Web UI)
+  # ============================================================
+  langfuse:
+    image: langfuse/langfuse:latest
+    container_name: langfuse
+    ports:
+      - "3105:3000"
+    environment:
+      - DATABASE_URL=postgres://chatbot_user:chatbot_password@postgres:5432/langfuse
+      - NEXTAUTH_SECRET=${LANGFUSE_NEXTAUTH_SECRET:-Ovm1kskiBcOJrnrW0-Z2hNsF7tJ0WFX5creRl_Ir1rE}
+      - NEXTAUTH_URL=${LANGFUSE_NEXTAUTH_URL:-http://localhost:3105}
+      - SALT=${LANGFUSE_SALT:-jyOPg9kRLzSum3Q5rNKkeosTfEX6wGxfm31v7x8D_0I}
+    volumes:
+      - langfuse-data:/var/lib/langfuse
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 
 volumes:
   postgres_data:
   backend_uploads:
+  langfuse-data:
 
 networks:
   default:
