@@ -696,6 +696,102 @@ async def test_vector_stats():
 
 
 # ============================================================
+# LlamaIndex Enhanced RAG Endpoints
+# ============================================================
+
+@app.get("/rag/llamaindex/config")
+async def get_llamaindex_config():
+    """Get LlamaIndex RAG configuration."""
+    return {
+        "status": "available",
+        "features": {
+            "hybrid_search": True,
+            "multiple_chunking": True,
+            "query_cache": True,
+            "custom_embeddings": True,
+        },
+        "chunk_strategies": ["auto", "semantic", "fixed", "code", "markdown"],
+        "default_chunk_strategy": "auto",
+        "default_top_k": 10,
+    }
+
+
+from pydantic import BaseModel
+
+# Pydantic models for LlamaIndex endpoints
+class LlamaIndexQueryRequest(BaseModel):
+    query: str
+    sources: Optional[List[str]] = None
+    use_cache: bool = True
+    top_k: int = 10
+
+
+@app.post("/rag/llamaindex/query")
+async def llamaindex_query(request: LlamaIndexQueryRequest):
+    """Query using LlamaIndex enhanced RAG.
+    
+    This endpoint uses LlamaIndex with advanced features:
+    - Hybrid search (vector + keyword)
+    - Multiple chunking strategies
+    - Query caching
+    - Custom Qwen3 embeddings
+    """
+    try:
+        from enhanced_rag import enhanced_rag_query
+        
+        result = await enhanced_rag_query(
+            query=request.query,
+            sources=request.sources,
+            use_cache=request.use_cache,
+            top_k=request.top_k,
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error in LlamaIndex query: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error processing query: {str(e)}"
+        )
+
+
+@app.get("/rag/llamaindex/stats")
+async def llamaindex_stats():
+    """Get LlamaIndex RAG statistics."""
+    try:
+        from enhanced_rag import get_stats
+        
+        stats = get_stats()
+        return stats
+        
+    except Exception as e:
+        logger.error(f"Error getting LlamaIndex stats: {str(e)}")
+        return {"error": str(e)}
+
+
+@app.post("/rag/llamaindex/cache/clear")
+async def llamaindex_cache_clear():
+    """Clear the LlamaIndex query cache."""
+    try:
+        from enhanced_rag import get_query_cache
+        
+        cache = get_query_cache()
+        cache.clear()
+        
+        return {
+            "status": "success",
+            "message": "Query cache cleared successfully"
+        }
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error clearing cache: {str(e)}"
+        )
+
+
+# ============================================================
 # RAG Admin API - 管理员功能
 # ============================================================
 
