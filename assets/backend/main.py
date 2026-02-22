@@ -42,6 +42,7 @@ from models import ChatIdRequest, ChatRenameRequest, SelectedModelRequest
 from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
+from openai_compatible import router as openai_router
 
 AUTH_ENABLED = os.getenv("SUPABASE_JWT_SECRET") is not None
 
@@ -119,6 +120,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 注册 OpenAI 兼容 API 路由
+app.include_router(openai_router)
 
 
 async def handle_chat_messages(websocket: WebSocket, chat_id: str):
