@@ -20,6 +20,13 @@ interface WelcomeSectionProps {
   setQuery: (value: string) => void;
 }
 
+const suggestedActions = [
+  "What are the advantages of using Next.js?",
+  "Write code to demonstrate Dijkstra's algorithm",
+  "Help me write an essay about Silicon Valley",
+  "What is the weather in San Francisco?",
+];
+
 export default function WelcomeSection({ setQuery }: WelcomeSectionProps) {
   const promptTemplates = {
     rag: "What is the Blackwell GB202 GPU according the whitepaper document i uploaded?",
@@ -39,11 +46,30 @@ My palette is:
     setQuery(promptTemplates[promptKey]);
   };
 
+  const handleSuggestionClick = (suggestion: string) => {
+    setQuery(suggestion);
+  };
+
   return (
     <div className={styles.welcomeContainer}>
       <div className={styles.welcomeMessage}>
         Hello! Send a message to start chatting with Spark.
       </div>
+
+      {/* Suggested Actions - 快速提示 */}
+      <div className={styles.suggestedActions}>
+        {suggestedActions.map((suggestion, index) => (
+          <button
+            key={suggestion}
+            className={styles.suggestionButton}
+            onClick={() => handleSuggestionClick(suggestion)}
+            style={{ animationDelay: `${0.1 * index}s` }}
+          >
+            {suggestion}
+          </button>
+        ))}
+      </div>
+
       <div className={styles.agentCards}>
         <div 
           className={`${styles.agentCard} ${styles.animate1}`}
