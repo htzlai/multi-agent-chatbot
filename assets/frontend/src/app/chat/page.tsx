@@ -259,6 +259,7 @@ export default function ChatPage() {
           isStreaming={isStreaming}
           currentStreamingContent={streamingContent}
           className="flex-1"
+          onSendMessage={handleSendMessage}
         />
 
         {/* Input Area */}

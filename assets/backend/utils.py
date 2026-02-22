@@ -103,6 +103,7 @@ async def process_and_ingest_files_background(
             indexing_tasks[task_id] = "indexing_documents"
             vector_store.index_documents(documents)
             
+            # Update both config and source_mapping
             if file_names:
                 config = config_manager.read_config()
                 
@@ -111,6 +112,9 @@ async def process_and_ingest_files_background(
                     if file_name not in config.sources:
                         config.sources.append(file_name)
                         config_updated = True
+                    
+                    # Also update source_mapping for tracking
+                    vector_store.register_source(file_name, task_id)
                 
                 if config_updated:
                     config_manager.write_config(config)

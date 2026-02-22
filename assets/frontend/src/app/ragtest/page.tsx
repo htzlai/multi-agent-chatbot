@@ -74,10 +74,42 @@ interface LlamaIndexStats {
   cache: { enabled: boolean; ttl: number; cached_queries: number };
 }
 
+interface LlamaIndexConfig {
+  status: string;
+  features: {
+    hybrid_search: boolean;
+    multiple_chunking: boolean;
+    query_cache: boolean;
+    custom_embeddings: boolean;
+  };
+  chunk_strategies: string[];
+  default_chunk_strategy: string;
+  default_top_k: number;
+}
+
+interface LlamaIndexConfig {
+  status: string;
+  features: {
+    hybrid_search: boolean;
+    multiple_chunking: boolean;
+    query_cache: boolean;
+    custom_embeddings: boolean;
+  };
+  chunk_strategies: string[];
+  default_chunk_strategy: string;
+  default_top_k: number;
+}
+
 interface RagStats {
   vector_store: { collection: string; total_entities: number; fields: string[] };
   documents: { total_count: number; selected_count: number; unselected_count: number };
   conversations: { total_count: number };
+}
+
+interface UploadTask {
+  task_id: string;
+  status: string;
+  files: string[];
 }
 
 // ============== Main Component ==============
@@ -99,6 +131,21 @@ export default function RagtestPage() {
   const [selectedModel, setSelectedModel] = useState('');
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [llamaStats, setLlamaStats] = useState<LlamaIndexStats | null>(null);
+  const [llamaConfig, setLlamaConfig] = useState<LlamaIndexConfig | null>(null);
+
+  // Upload state
+  const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState('');
+  const [uploadTaskId, setUploadTaskId] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<string>('');
+
+  // Chat rename state
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [newChatName, setNewChatName] = useState('');
+
+  // Current chat ID
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
 
   // LlamaIndex
   const [llamaQuery, setLlamaQuery] = useState('');
@@ -130,7 +177,9 @@ export default function RagtestPage() {
         fetchModels(),
         fetchChats(),
         fetchRagStats(),
-        fetchLlamaStats()
+        fetchLlamaStats(),
+        fetchLlamaConfig(),
+        fetchCurrentChatId()
       ]);
     } finally {
       setIsLoading(false);
@@ -185,6 +234,23 @@ export default function RagtestPage() {
     try {
       const res = await fetch('/api/rag/llamaindex/stats');
       if (res.ok) setLlamaStats(await res.json());
+    } catch (err) { console.error(err); }
+  };
+
+  const fetchLlamaConfig = async () => {
+    try {
+      const res = await fetch('/api/rag/llamaindex/config');
+      if (res.ok) setLlamaConfig(await res.json());
+    } catch (err) { console.error(err); }
+  };
+
+  const fetchCurrentChatId = async () => {
+    try {
+      const res = await fetch('/api/chat_id');
+      if (res.ok) {
+        const data = await res.json();
+        setCurrentChatId(data.chat_id);
+      }
     } catch (err) { console.error(err); }
   };
 
@@ -271,13 +337,23 @@ export default function RagtestPage() {
   };
 
   const handleDeleteSource = async (sourceName: string) => {
-    if (!confirm(`Delete source "${sourceName}"? This cannot be undone.`)) return;
+    if (!confirm(`Delete source "${sourceName}"? This will also delete all vectors from the vector database. This cannot be undone.`)) return;
     try {
-      await fetch(`/api/collections/${encodeURIComponent(sourceName)}`, { method: 'DELETE' });
+      const res = await fetch(`/api/collections/${encodeURIComponent(sourceName)}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (res.ok) {
+        alert(`Deleted: ${sourceName}`);
+      } else {
+        alert(`Error: ${data.detail || 'Unknown error'}`);
+      }
+      // Refresh all data after deletion
       fetchSources();
       fetchRagStats();
       fetchVectorStats();
-    } catch (err) { console.error(err); }
+    } catch (err) { 
+      console.error(err);
+      alert('Failed to delete source');
+    }
   };
 
   const handleNewChat = async () => {
@@ -321,6 +397,77 @@ export default function RagtestPage() {
     } catch (err) { console.error(err); }
   };
 
+  // File upload handler
+  const handleFileUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadFiles || uploadFiles.length === 0) return;
+
+    setIsUploading(true);
+    setUploadMessage('');
+    setUploadStatus('');
+
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < uploadFiles.length; i++) {
+        formData.append('files', uploadFiles[i]);
+      }
+
+      const res = await fetch('/api/ingest', {
+        method: 'POST',
+        body: formData
+      });
+
+      const data = await res.json();
+      setUploadMessage(data.message || 'Files uploaded');
+      setUploadTaskId(data.task_id);
+      setUploadStatus(data.status);
+
+      // Poll for status if task_id exists
+      if (data.task_id) {
+        const pollStatus = async () => {
+          const statusRes = await fetch(`/api/ingest/status/${data.task_id}`);
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            setUploadStatus(statusData.status);
+            if (statusData.status === 'completed' || statusData.status === 'failed') {
+              return;
+            }
+            setTimeout(pollStatus, 2000);
+          }
+        };
+        setTimeout(pollStatus, 2000);
+      }
+
+      fetchSources();
+      fetchRagStats();
+      fetchVectorStats();
+    } catch (err) {
+      setUploadMessage('Upload failed: ' + String(err));
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  // Chat rename handler
+  const handleRenameChat = async (chatId: string) => {
+    if (!newChatName.trim()) return;
+    try {
+      await fetch('/api/chat/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, new_name: newChatName })
+      });
+      setRenamingChatId(null);
+      setNewChatName('');
+      fetchChats();
+    } catch (err) { console.error(err); }
+  };
+
+  const startRename = (chatId: string, currentName: string) => {
+    setRenamingChatId(chatId);
+    setNewChatName(currentName);
+  };
+
   const selectedSources = sources.filter(s => s.selected);
   const unselectedSources = sources.filter(s => !s.selected);
 
@@ -342,7 +489,56 @@ export default function RagtestPage() {
       {/* Header */}
       <div className={styles.header}>
         <h1 className={styles.title}>RAG System Console</h1>
+        <button 
+          onClick={fetchAllData} 
+          className={styles.backLink}
+          style={{ background: '#f0f0f0', padding: '6px 12px', cursor: 'pointer' }}
+        >
+          🔄 Refresh All
+        </button>
         <Link href="/" className={styles.backLink}>Back to Chat</Link>
+      </div>
+
+      {/* Current Session & Upload - Full Width */}
+      <div className={styles.row}>
+        {/* Current Session ID */}
+        <div className={styles.panel}>
+          <h2 className={styles.panelTitle}>Current Session</h2>
+          {currentChatId ? (
+            <div className={styles.infoList}>
+              <div className={styles.infoItem}>
+                <span className={styles.infoLabel}>Chat ID</span>
+                <span className={styles.infoValue} style={{ fontSize: '12px', fontFamily: 'monospace' }}>{currentChatId}</span>
+              </div>
+            </div>
+          ) : (
+            <p className={styles.emptyState}>No active session</p>
+          )}
+        </div>
+
+        {/* File Upload */}
+        <div className={styles.panel}>
+          <h2 className={styles.panelTitle}>Upload Documents</h2>
+          <form onSubmit={handleFileUpload} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <input
+              type="file"
+              multiple
+              accept=".pdf,.txt,.doc,.docx"
+              onChange={(e) => setUploadFiles(e.target.files)}
+              className={styles.searchInput}
+              style={{ padding: '0.5rem' }}
+            />
+            <button type="submit" className={styles.searchButton} disabled={isUploading || !uploadFiles || uploadFiles.length === 0}>
+              {isUploading ? 'Uploading...' : 'Upload & Index'}
+            </button>
+          </form>
+          {uploadMessage && (
+            <div style={{ marginTop: '0.5rem', fontSize: '13px', color: uploadStatus === 'completed' ? 'green' : uploadStatus === 'failed' ? 'red' : '#666' }}>
+              {uploadMessage}
+              {uploadStatus && ` (${uploadStatus})`}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Search Panel - Full Width */}
@@ -535,21 +731,48 @@ export default function RagtestPage() {
           <div className={styles.statsGrid}>
             <div className={styles.statCard}>
               <div className={styles.statValue}>{vectorStats?.total_entities?.toLocaleString() || '0'}</div>
-              <div className={styles.statLabel}>Vectors</div>
-            </div>
-            <div className={styles.statCard}>
-              <div className={styles.statValue}>{vectorStats?.fields?.length || '0'}</div>
-              <div className={styles.statLabel}>Fields</div>
+              <div className={styles.statLabel}>Total Vectors</div>
             </div>
             <div className={styles.statCard}>
               <div className={styles.statValue}>{ragStats?.documents.total_count || '0'}</div>
-              <div className={styles.statLabel}>Documents</div>
+              <div className={styles.statLabel}>Total Docs</div>
+            </div>
+            <div className={styles.statCard}>
+              <div className={styles.statValue} style={{ color: selectedSources.length > 0 ? 'green' : 'orange' }}>
+                {selectedSources.length}
+              </div>
+              <div className={styles.statLabel}>Selected</div>
             </div>
             <div className={styles.statCard}>
               <div className={styles.statValue}>{ragStats?.conversations.total_count || '0'}</div>
               <div className={styles.statLabel}>Sessions</div>
             </div>
           </div>
+          {/* Vector Details */}
+          {vectorStats && (
+            <div className={styles.infoList} style={{ marginTop: '1rem' }}>
+              <div className={styles.infoItem}>
+                <span className={styles.infoLabel}>💡 Tip</span>
+                <span className={styles.infoValue} style={{ fontSize: '12px' }}>
+                  {selectedSources.length === 0 ? 'Select sources below to enable RAG search!' : `${selectedSources.length} sources selected for search`}
+                </span>
+              </div>
+              <div className={styles.infoItem}>
+                <span className={styles.infoLabel}>Avg Vectors/Doc</span>
+                <span className={styles.infoValue}>
+                  {ragStats?.documents.total_count ? 
+                    Math.round(vectorStats.total_entities / ragStats.documents.total_count).toLocaleString() 
+                    : '0'}
+                </span>
+              </div>
+              <div className={styles.infoItem}>
+                <span className={styles.infoLabel}>Status</span>
+                <span className={styles.infoValue} style={{ color: vectorStats.total_entities > 0 ? 'green' : 'orange' }}>
+                  {vectorStats.total_entities > 0 ? '✓ Ready' : '⚠ Empty'}
+                </span>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Model Management */}
@@ -582,11 +805,33 @@ export default function RagtestPage() {
           <div className={styles.chatList} style={{ maxHeight: '200px' }}>
             {chats.map(chat => (
               <div key={chat.chat_id} className={styles.chatItem}>
-                <span className={styles.chatItemName}>{chat.name}</span>
-                <div className={styles.chatItemActions}>
-                  <button className={styles.chatActionBtn} onClick={() => handleViewChatMessages(chat.chat_id)}>View</button>
-                  <button className={styles.chatActionBtn} onClick={() => handleDeleteChat(chat.chat_id)}>Delete</button>
-                </div>
+                {renamingChatId === chat.chat_id ? (
+                  <div style={{ display: 'flex', gap: '0.5rem', flex: 1, alignItems: 'center' }}>
+                    <input
+                      type="text"
+                      value={newChatName}
+                      onChange={(e) => setNewChatName(e.target.value)}
+                      className={styles.searchInput}
+                      style={{ flex: 1, padding: '0.25rem 0.5rem' }}
+                      autoFocus
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRenameChat(chat.chat_id);
+                        if (e.key === 'Escape') { setRenamingChatId(null); setNewChatName(''); }
+                      }}
+                    />
+                    <button className={styles.chatActionBtn} onClick={() => handleRenameChat(chat.chat_id)}>Save</button>
+                    <button className={styles.chatActionBtn} onClick={() => { setRenamingChatId(null); setNewChatName(''); }}>Cancel</button>
+                  </div>
+                ) : (
+                  <>
+                    <span className={styles.chatItemName}>{chat.name}</span>
+                    <div className={styles.chatItemActions}>
+                      <button className={styles.chatActionBtn} onClick={() => startRename(chat.chat_id, chat.name)}>Rename</button>
+                      <button className={styles.chatActionBtn} onClick={() => handleViewChatMessages(chat.chat_id)}>View</button>
+                      <button className={styles.chatActionBtn} onClick={() => handleDeleteChat(chat.chat_id)}>Delete</button>
+                    </div>
+                  </>
+                )}
               </div>
             ))}
           </div>
@@ -608,6 +853,13 @@ export default function RagtestPage() {
               <div className={styles.infoItem}><span className={styles.infoLabel}>Embedding Dim</span><span className={styles.infoValue}>{llamaStats.index.embedding_dimensions}</span></div>
               <div className={styles.infoItem}><span className={styles.infoLabel}>Cache Enabled</span><span className={styles.infoValue}>{llamaStats.cache.enabled ? 'Yes' : 'No'}</span></div>
               <div className={styles.infoItem}><span className={styles.infoLabel}>Cached Queries</span><span className={styles.infoValue}>{llamaStats.cache.cached_queries}</span></div>
+              {llamaConfig && (
+                <div className={styles.infoList}>
+                  <div className={styles.infoItem}><span className={styles.infoLabel}>Hybrid Search</span><span className={styles.infoValue}>{llamaConfig.features.hybrid_search ? 'Yes' : 'No'}</span></div>
+                  <div className={styles.infoItem}><span className={styles.infoLabel}>Chunk Strategy</span><span className={styles.infoValue}>{llamaConfig.default_chunk_strategy}</span></div>
+                  <div className={styles.infoItem}><span className={styles.infoLabel}>Default Top-K</span><span className={styles.infoValue}>{llamaConfig.default_top_k}</span></div>
+                </div>
+              )}
             </div>
           )}
         </div>

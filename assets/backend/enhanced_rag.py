@@ -163,8 +163,21 @@ def milvus_query(
     collection = Collection("context")
     collection.load()
     
-    # Build search parameters
-    search_params = {"metric_type": "IP", "params": {}}
+    # Build search parameters - detect metric type from index
+    metric_type = "IP"  # Default
+    try:
+        indexes = collection.indexes
+        if indexes:
+            index_params = indexes[0]._index_params
+            if "metric_type" in index_params:
+                metric_type = index_params["metric_type"]
+            elif "params" in index_params and isinstance(index_params["params"], dict):
+                if "metric_type" in index_params["params"]:
+                    metric_type = index_params["params"]["metric_type"]
+    except Exception as e:
+        logger.warning(f"Could not detect metric type, using default: {e}")
+    
+    search_params = {"metric_type": metric_type, "params": {}}
     
     # Execute search
     if sources:

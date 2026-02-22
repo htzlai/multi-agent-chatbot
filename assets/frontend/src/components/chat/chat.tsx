@@ -17,13 +17,23 @@ interface ChatProps {
   isStreaming?: boolean;
   currentStreamingContent?: string;
   className?: string;
+  onSendMessage?: (content: string) => void;
 }
+
+// 快速提示 - 参考 openchat-main 和 demo.chat-sdk.dev
+const suggestedActions = [
+  "What are the advantages of using Next.js?",
+  "Write code to demonstrate Dijkstra's algorithm",
+  "Help me write an essay about Silicon Valley",
+  "What is the weather in San Francisco?",
+];
 
 export function Chat({
   messages,
   isStreaming = false,
   currentStreamingContent = "",
   className,
+  onSendMessage,
 }: ChatProps) {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
   const containerRef = React.useRef<HTMLDivElement>(null);
@@ -52,15 +62,16 @@ export function Chat({
           {/* Welcome Message (empty state) */}
           {messages.length === 0 && !isStreaming && (
             <div className="flex flex-col items-center justify-center py-20 text-center">
-              <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-primary/10">
+              {/* Welcome Title */}
+              <div className="mb-4 flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-primary/5">
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
-                  width="32"
-                  height="32"
+                  width="40"
+                  height="40"
                   viewBox="0 0 24 24"
                   fill="none"
                   stroke="currentColor"
-                  strokeWidth="2"
+                  strokeWidth="1.5"
                   strokeLinecap="round"
                   strokeLinejoin="round"
                   className="text-primary"
@@ -68,11 +79,24 @@ export function Chat({
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               </div>
-              <h2 className="mb-2 text-xl font-semibold">How can I help you today?</h2>
-              <p className="max-w-md text-sm text-muted-foreground">
+              <h2 className="mb-3 text-2xl font-semibold">How can I help you today?</h2>
+              <p className="mb-8 max-w-lg text-base text-muted-foreground">
                 I can help you search through your documents, answer questions, and more.
-                Just type a message below to get started.
               </p>
+
+              {/* Suggested Actions - 横向排列的胶囊按钮 */}
+              <div className="flex w-full flex-wrap items-center justify-center gap-2">
+                {suggestedActions.map((suggestion, index) => (
+                  <button
+                    key={suggestion}
+                    onClick={() => onSendMessage?.(suggestion)}
+                    className="cursor-pointer rounded-full border border-border bg-background px-5 py-2.5 text-left text-sm font-normal text-foreground shadow-sm transition-all hover:border-primary/50 hover:bg-secondary/50 hover:shadow-md"
+                    style={{ animationDelay: `${0.05 * index}s` }}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
             </div>
           )}
 
@@ -207,8 +231,7 @@ function MessageBubble({ message }: MessageBubbleProps) {
         {/* User message bubble */}
         {isUser ? (
           <div
-            className="break-words rounded-2xl px-4 py-2 text-white"
-            style={{ backgroundColor: "#006cff" }}
+            className="break-words rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[15px] text-white shadow-sm"
           >
             <MarkdownContent content={message.content} />
           </div>

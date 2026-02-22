@@ -162,12 +162,41 @@ class VectorStore:
         })
     
     def _initialize_store(self):
-        self._store = Milvus(
-            embedding_function=self.embeddings,
-            collection_name=self.DEFAULT_COLLECTION_NAME,
-            connection_args={"uri": self.uri},
-            auto_id=True
-        )
+        try:
+            from pymilvus import connections, Collection, utility
+            # First, ensure connection exists
+            try:
+                connections.connect(alias=self.alias, uri=self.uri)
+            except Exception:
+                pass  # Connection might already exist
+            
+            # Check if collection exists
+            if utility.has_collection(self.DEFAULT_COLLECTION_NAME):
+                self._store = Milvus(
+                    embedding_function=self.embeddings,
+                    collection_name=self.DEFAULT_COLLECTION_NAME,
+                    connection_args={"uri": self.uri},
+                    auto_id=True
+                )
+                logger.info(f"Connected to existing collection: {self.DEFAULT_COLLECTION_NAME}")
+            else:
+                # Create new collection
+                self._store = Milvus(
+                    embedding_function=self.embeddings,
+                    collection_name=self.DEFAULT_COLLECTION_NAME,
+                    connection_args={"uri": self.uri},
+                    auto_id=True
+                )
+                logger.info(f"Created new collection: {self.DEFAULT_COLLECTION_NAME}")
+        except Exception as e:
+            logger.error(f"Error initializing vector store: {e}")
+            # Fallback: try to create anyway
+            self._store = Milvus(
+                embedding_function=self.embeddings,
+                collection_name=self.DEFAULT_COLLECTION_NAME,
+                connection_args={"uri": self.uri},
+                auto_id=True
+            )
         logger.debug({
             "message": "Milvus vector store initialized",
             "uri": self.uri,
@@ -543,27 +572,41 @@ class VectorStore:
                     )
 
                     if not has_source_index:
-                        # Create index on source field if not exists
-                        from pymilvus import Index
-                        index_params = {
-                            "field_name": "source",
-                            "index_type": "STL_SORT",
-                            "metric_type": "INVALID"  # Not used for filtering
-                        }
-                        collection.create_index("source", index_params)
+                        # For string fields, we cannot create STL_SORT index
+                        # Instead, we'll use a different approach: query pks first, then delete by pk
                         logger.debug({
-                            "message": "Created index on source field for deletion"
+                            "message": "Cannot create STL_SORT index on string field, will use pk-based deletion"
                         })
 
-                # Delete using the filter
-                delete_result = collection.delete(filter_expr)
-                collection.flush()
-
-                logger.info({
-                    "message": "Deleted vectors by source",
-                    "source": source_name,
-                    "delete_count": delete_result.delete_count if hasattr(delete_result, 'delete_count') else "unknown"
-                })
+                # Delete using the filter - for string fields we need to query pks first
+                try:
+                    # Query to get primary keys of entities matching the source
+                    query_results = collection.query(
+                        expr=filter_expr,
+                        output_fields=["pk"]
+                    )
+                    
+                    if query_results:
+                        pks = [result["pk"] for result in query_results]
+                        # Delete by primary keys
+                        delete_result = collection.delete(f"pk in {pks}")
+                        collection.flush()
+                        logger.info({
+                            "message": "Deleted vectors by source using pk-based deletion",
+                            "source": source_name,
+                            "delete_count": len(pks)
+                        })
+                    else:
+                        logger.info({
+                            "message": "No vectors found for source",
+                            "source": source_name
+                        })
+                except Exception as query_error:
+                    logger.warning({
+                        "message": "Failed to delete vectors",
+                        "source": source_name,
+                        "error": str(query_error)
+                    })
 
             except Exception as delete_error:
                 logger.warning({
@@ -626,6 +669,38 @@ class VectorStore:
         """
         # Delegate to delete_by_source for proper source-based deletion
         return self.delete_by_source(collection_name)
+
+    def delete_all_collections(self) -> bool:
+        """Delete all vectors from the Milvus collection.
+
+        This will clear all vectors from the 'context' collection while
+        keeping the collection schema intact.
+
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            from pymilvus import Collection, utility
+            collection = Collection(self.collection_name, using=self.alias)
+            collection.load()
+            
+            # Get all primary keys
+            all_pks = collection.query(
+                expr="pk >= 0",
+                output_fields=["pk"]
+            )
+            
+            if all_pks:
+                pks = [item["pk"] for item in all_pks]
+                collection.delete(f"pk in {pks}")
+                collection.flush()
+            
+            collection.release()
+            logger.info("All vectors deleted successfully")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting all collections: {e}", exc_info=True)
+            return False
 
 
 def create_vector_store_with_config(config_manager, uri: str = "http://milvus:19530") -> VectorStore:
