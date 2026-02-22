@@ -16,6 +16,7 @@
 */
 "use client";
 import { useState, useRef, useEffect } from 'react';
+import Link from 'next/link';
 import QuerySection from '@/components/QuerySection';
 import DocumentIngestion from '@/components/DocumentIngestion';
 import Sidebar from '@/components/Sidebar';
@@ -83,7 +84,14 @@ export default function Home() {
 
   return (
     <div className={styles.container}>
-      <Sidebar 
+      {/* Header with navigation links */}
+      <div className={styles.header}>
+        <Link href="/ragtest" className={styles.navLink}>
+          RAG Test Console
+        </Link>
+      </div>
+
+      <Sidebar
         showIngestion={showIngestion}
         setShowIngestion={setShowIngestion}
         refreshTrigger={refreshTrigger}

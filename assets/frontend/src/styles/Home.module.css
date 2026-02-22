@@ -80,6 +80,25 @@
   margin-bottom: 1.5rem;
 }
 
+.navLink {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  z-index: 10;
+  padding: 8px 16px;
+  background: #76B900;
+  color: white;
+  text-decoration: none;
+  border-radius: 8px;
+  font-size: 0.875rem;
+  font-weight: 500;
+  transition: background 0.2s;
+}
+
+.navLink:hover {
+  background: #669f00;
+}
+
 .title {
   color: #2d3748;
   font-size: 2rem;

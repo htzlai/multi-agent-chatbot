@@ -593,9 +593,99 @@ input:checked + .toggleSlider:before {
   margin-right: 8px;
 }
 
+.selectAllButton, .deselectAllButton {
+  padding: 6px 12px;
+  background-color: #e2e8f0;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  flex: 1;
+}
+
+.selectAllButton {
+  background-color: #76B900;
+  color: white;
+}
+
+.selectAllButton:hover {
+  background-color: #669f00;
+}
+
+.deselectAllButton {
+  background-color: #e2e8f0;
+  color: #4a5568;
+}
+
+.deselectAllButton:hover {
+  background-color: #cbd5e0;
+}
+
+:global(.dark) .selectAllButton {
+  background-color: #76B900;
+}
+
+:global(.dark) .selectAllButton:hover {
+  background-color: #669f00;
+}
+
+:global(.dark) .deselectAllButton {
+  background-color: #374151;
+  color: #e5e7eb;
+}
+
+:global(.dark) .deselectAllButton:hover {
+  background-color: #4b5563;
+}
+
+.selectAllButton:disabled, .deselectAllButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .sourceItem label {
   font-size: 14px;
   cursor: pointer;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sourceLabel {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  color: #4a5568;
+}
+
+:global(.dark) .sourceLabel {
+  color: #e5e7eb;
+}
+
+.deleteSourceButton {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  font-size: 16px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.2s ease;
+  margin-left: 4px;
+}
+
+.deleteSourceButton:hover {
+  background-color: #fee2e2;
+  color: #dc2626;
+}
+
+:global(.dark) .deleteSourceButton:hover {
+  background-color: #7f1d1d;
+  color: #fca5a5;
 }
 
 :global(.dark) .sourceItem label {
@@ -812,4 +902,68 @@ input:checked + .toggleSlider:before {
 :global(.dark) .chatList::before {
   background: rgba(118, 185, 0, 0.15);
   border-color: rgba(118, 185, 0, 0.3);
+}
+
+/* RAG Stats Panel */
+.statsPanel {
+  background-color: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+:global(.dark) .statsPanel {
+  background-color: #1f2937;
+  border-color: #374151;
+}
+
+.statsTitle {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 8px;
+}
+
+:global(.dark) .statsTitle {
+  color: #94a3b8;
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+.statItem {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 6px;
+  background-color: white;
+  border-radius: 6px;
+  border: 1px solid #e2e8f0;
+}
+
+:global(.dark) .statItem {
+  background-color: #374151;
+  border-color: #4b5563;
+}
+
+.statValue {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #76B900;
+}
+
+.statLabel {
+  font-size: 0.65rem;
+  color: #64748b;
+  text-transform: uppercase;
+}
+
+:global(.dark) .statLabel {
+  color: #94a3b8;
 } 

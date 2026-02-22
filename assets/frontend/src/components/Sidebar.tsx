@@ -26,6 +26,13 @@ interface ChatMetadata {
   name: string;
 }
 
+interface RagStats {
+  total_vectors: number;
+  total_documents: number;
+  selected_documents: number;
+  total_sessions: number;
+}
+
 interface SidebarProps {
   showIngestion: boolean;
   setShowIngestion: (value: boolean) => void;
@@ -55,6 +62,8 @@ export default function Sidebar({
   const [chats, setChats] = useState<string[]>([]);
   const [isLoadingChats, setIsLoadingChats] = useState(false);
   const [chatMetadata, setChatMetadata] = useState<Record<string, ChatMetadata>>({});
+  const [ragStats, setRagStats] = useState<RagStats | null>(null);
+  const [isLoadingStats, setIsLoadingStats] = useState(false);
   
   // Add ref for chat list
   const chatListRef = useRef<HTMLDivElement>(null);
@@ -131,14 +140,14 @@ export default function Sidebar({
       setIsLoadingSources(true);
       console.log("Fetching sources...");
       const response = await fetch("/api/sources");
-      
+
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Error fetching sources: ${response.status} - ${errorText}`);
         setAvailableSources([]);
         return;
       }
-      
+
       const data = await response.json();
       console.log("Sources fetched:", data.sources);
       setAvailableSources(data.sources || []);
@@ -150,10 +159,112 @@ export default function Sidebar({
     }
   }, []);
 
+  // Fetch RAG stats
+  const fetchRagStats = useCallback(async () => {
+    try {
+      setIsLoadingStats(true);
+      const response = await fetch("/api/admin/rag/stats");
+      if (response.ok) {
+        const data = await response.json();
+        setRagStats(data);
+      }
+    } catch (error) {
+      console.error("Error fetching RAG stats:", error);
+    } finally {
+      setIsLoadingStats(false);
+    }
+  }, []);
+
+  // Handle delete source
+  const handleDeleteSource = async (source: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+
+    const confirmDelete = window.confirm(
+      `Are you sure you want to delete "${source}"? This will remove it from the knowledge base.`
+    );
+
+    if (!confirmDelete) return;
+
+    try {
+      const response = await fetch(`/api/sources/${encodeURIComponent(source)}`, {
+        method: "DELETE"
+      });
+
+      if (!response.ok) {
+        console.error("Failed to delete source");
+        alert("Failed to delete source. Please try again.");
+        return;
+      }
+
+      // Refresh sources list
+      await fetchSources();
+      // Refresh stats
+      await fetchRagStats();
+
+      console.log(`Successfully deleted source: ${source}`);
+    } catch (error) {
+      console.error("Error deleting source:", error);
+      alert("An error occurred while deleting the source.");
+    }
+  };
+
+  // Handle select all sources
+  const handleSelectAllSources = async () => {
+    try {
+      const response = await fetch("/api/admin/rag/sources/select-all", {
+        method: "POST"
+      });
+
+      if (!response.ok) {
+        console.error("Failed to select all sources");
+        return;
+      }
+
+      // Refresh selected sources
+      const sourcesResponse = await fetch("/api/selected_sources");
+      if (sourcesResponse.ok) {
+        const { sources } = await sourcesResponse.json();
+        setSelectedSources(sources);
+      }
+
+      // Refresh stats
+      await fetchRagStats();
+    } catch (error) {
+      console.error("Error selecting all sources:", error);
+    }
+  };
+
+  // Handle deselect all sources
+  const handleDeselectAllSources = async () => {
+    try {
+      const response = await fetch("/api/admin/rag/sources/deselect-all", {
+        method: "POST"
+      });
+
+      if (!response.ok) {
+        console.error("Failed to deselect all sources");
+        return;
+      }
+
+      // Refresh selected sources
+      const sourcesResponse = await fetch("/api/selected_sources");
+      if (sourcesResponse.ok) {
+        const { sources } = await sourcesResponse.json();
+        setSelectedSources(sources);
+      }
+
+      // Refresh stats
+      await fetchRagStats();
+    } catch (error) {
+      console.error("Error deselecting all sources:", error);
+    }
+  };
+
   // Get sources on initial load and when the context section is expanded
   useEffect(() => {
     if (expandedSections.has('context')) {
       fetchSources();
+      fetchRagStats();
     }
   }, [expandedSections.has('context'), fetchSources]);
 
@@ -553,14 +664,38 @@ export default function Sidebar({
             
             {/* Context */}
             <div className={styles.sidebarSection}>
-              <div 
-                className={styles.sectionHeader} 
+              <div
+                className={styles.sectionHeader}
                 onClick={() => toggleSection('context')}
               >
                 <h3>Context</h3>
                 <span className={isSectionExpanded('context') ? styles.arrowUp : styles.arrowDown}>▼</span>
               </div>
               <div className={`${styles.sectionContent} ${isSectionExpanded('context') ? styles.expanded : ''}`}>
+                {/* RAG Stats Panel */}
+                {ragStats && (
+                  <div className={styles.statsPanel}>
+                    <div className={styles.statsTitle}>RAG Statistics</div>
+                    <div className={styles.statsGrid}>
+                      <div className={styles.statItem}>
+                        <span className={styles.statValue}>{ragStats.total_vectors?.toLocaleString() || '0'}</span>
+                        <span className={styles.statLabel}>Vectors</span>
+                      </div>
+                      <div className={styles.statItem}>
+                        <span className={styles.statValue}>{ragStats.total_documents || '0'}</span>
+                        <span className={styles.statLabel}>Documents</span>
+                      </div>
+                      <div className={styles.statItem}>
+                        <span className={styles.statValue}>{ragStats.selected_documents || '0'}</span>
+                        <span className={styles.statLabel}>Selected</span>
+                      </div>
+                      <div className={styles.statItem}>
+                        <span className={styles.statValue}>{ragStats.total_sessions || '0'}</span>
+                        <span className={styles.statLabel}>Sessions</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
                 <div className={styles.configItem}>
                   <label>Select Sources</label>
                   <div className={styles.sourcesContainer}>
@@ -575,13 +710,34 @@ export default function Sidebar({
                             checked={selectedSources.includes(source)}
                             onChange={() => handleSourceToggle(source)}
                           />
-                          <label htmlFor={`source-${source}`}>{source}</label>
+                          <label htmlFor={`source-${source}`} className={styles.sourceLabel}>{source}</label>
+                          <button
+                            className={styles.deleteSourceButton}
+                            onClick={(e) => handleDeleteSource(source, e)}
+                            title="Delete source"
+                          >
+                            ×
+                          </button>
                         </div>
                       ))
                     )}
                   </div>
                   <div className={styles.buttonGroup}>
-                    <button 
+                    <button
+                      className={styles.selectAllButton}
+                      onClick={handleSelectAllSources}
+                      disabled={isLoadingSources || availableSources.length === 0}
+                    >
+                      Select All
+                    </button>
+                    <button
+                      className={styles.deselectAllButton}
+                      onClick={handleDeselectAllSources}
+                      disabled={isLoadingSources || selectedSources.length === 0}
+                    >
+                      Deselect All
+                    </button>
+                    <button
                       className={styles.uploadDocumentsButton}
                       onClick={() => setShowIngestion(true)}
                       title="Upload Documents"
@@ -601,15 +757,16 @@ export default function Sidebar({
                       </svg>
                       Upload Documents
                     </button>
-                    <button 
+                    <button
                       className={styles.refreshButton}
                       onClick={(e) => {
                         e.preventDefault();
                         fetchSources();
+                        fetchRagStats();
                       }}
-                      disabled={isLoadingSources}
+                      disabled={isLoadingSources || isLoadingStats}
                     >
-                      {isLoadingSources ? "Loading..." : "Refresh Sources"}
+                      {isLoadingSources || isLoadingStats ? "Loading..." : "Refresh Sources"}
                     </button>
                   </div>
                 </div>
