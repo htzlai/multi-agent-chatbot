@@ -198,6 +198,8 @@ export default function QuerySection({
   const firstTokenReceived = useRef(false);
   const hasAssistantContent = useRef(false);
   const fadeTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [retryCount, setRetryCount] = useState(0);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -303,15 +305,19 @@ export default function QuerySection({
           }
         };
 
-        ws.onclose = () => {
-          console.log("WebSocket connection closed");
-          setIsStreaming(false);
-        };
-
         ws.onerror = (error) => {
-          console.error("WebSocket error:", error);
-          setIsStreaming(false);
-        };
+        console.error("WebSocket error:", error);
+        setIsStreaming(false);
+        setConnectionError("Connection lost. Please try again.");
+      };
+
+      ws.onclose = (event) => {
+        console.log("WebSocket connection closed:", event.code, event.reason);
+        if (!event.wasClean) {
+          setConnectionError("Connection interrupted. Please try again.");
+        }
+        setIsStreaming(false);
+      };
       } catch (error) {
         console.error("Error initializing WebSocket:", error);
         setIsStreaming(false);
@@ -366,6 +372,30 @@ export default function QuerySection({
   const scrollTimeout = useRef<number | null>(null);
   const isUserScrollingRef = useRef(false);
   const isNearBottomRef = useRef(true);
+
+  // Retry connection
+  const handleRetry = async () => {
+    setConnectionError(null);
+    setRetryCount(prev => prev + 1);
+    // Trigger re-initialization by changing currentChatId or similar
+    if (currentChatId) {
+      const wsProtocol = 'ws:';
+      const wsHost = 'localhost';
+      const wsPort = '8000';
+      const ws = new WebSocket(`${wsProtocol}//${wsHost}:${wsPort}/ws/chat/${currentChatId}`);
+
+      ws.onopen = () => {
+        console.log("WebSocket reconnected successfully");
+        setConnectionError(null);
+      };
+
+      ws.onmessage = wsRef.current?.onmessage;
+      ws.onerror = wsRef.current?.onerror;
+      ws.onclose = wsRef.current?.onclose;
+
+      wsRef.current = ws;
+    }
+  };
 
   // Check if user is near the bottom of the chat
   const checkScrollPosition = useCallback(() => {
@@ -613,6 +643,15 @@ export default function QuerySection({
         <br />
         <span className={styles.warning}>Don't forget to shutdown docker containers at the end of the demo.</span>
       </div>
+
+      {connectionError && (
+        <div className={styles.errorBanner}>
+          <span>{connectionError}</span>
+          <button onClick={handleRetry} className={styles.retryButton}>
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   );
 }
