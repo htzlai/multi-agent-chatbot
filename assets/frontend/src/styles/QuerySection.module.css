@@ -360,6 +360,7 @@
   animation-delay: 0.8s;
   transition: all 0.3s ease;
   gap: 12px;
+  z-index: 20;
 }
 
 :global(.dark) .inputContainer {
@@ -373,6 +374,7 @@
   align-items: center;
   width: 100%;
   max-width: 600px;
+  z-index: 20;
 }
 
 .messageInput {
@@ -958,5 +960,64 @@
 
 :global(.dark) .warning {
   color: #fbbf24;
+}
+
+/* Error Banner */
+.errorBanner {
+  position: fixed;
+  bottom: 80px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: #fee2e2;
+  color: #dc2626;
+  padding: 12px 20px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  box-shadow: 0 4px 12px rgba(220, 38, 38, 0.2);
+  z-index: 100;
+  animation: slideUp 0.3s ease;
+}
+
+:global(.dark) .errorBanner {
+  background: #7f1d1d;
+  color: #fca5a5;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.retryButton {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.retryButton:hover {
+  background: #b91c1c;
+}
+
+:global(.dark) .retryButton {
+  background: #fca5a5;
+  color: #7f1d1d;
+}
+
+:global(.dark) .retryButton:hover {
+  background: #f87171;
 }
 
