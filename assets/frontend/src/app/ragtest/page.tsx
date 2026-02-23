@@ -16,17 +16,26 @@
 */
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import styles from '@/styles/Ragtest.module.css';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
-// ============== Interfaces ==============
+// ============== Configuration ==============
+const API_BASE_URL = 'http://localhost:8000';
 
-interface VectorStats {
-  collection: string;
-  total_entities: number;
-  fields: any[];
-  index_count?: number;
+// ============== Types ==============
+interface Chat {
+  chat_id: string;
+  name?: string;
+  message_count?: number;
+  created_at?: string;
+}
+
+interface ChatMessage {
+  type: string;
+  content: string;
 }
 
 interface Source {
@@ -45,863 +54,1096 @@ interface SourceResult {
 interface RagResponse {
   answer: string;
   sources: SourceResult[];
-  retrieval_metadata: {
+  retrieval_metadata?: {
     total_chunks_retrieved: number;
     unique_sources_count: number;
     score_range: { min: number; max: number; avg: number };
   };
 }
 
-interface AdminSource {
-  name: string;
-  selected: boolean;
+interface Model {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
 }
 
-interface AdminConversation {
-  chat_id: string;
-  name: string;
-  message_count?: number;
-  created_at?: string;
+interface VectorStats {
+  collection: string;
+  total_entities: number;
+  fields: any[];
+  index_count?: number;
 }
 
-interface ChatMessage {
-  type: string;
-  content: string;
-}
+// ============== Utility Functions ==============
+const formatDate = (dateString?: string) => {
+  if (!dateString) return 'N/A';
+  return new Date(dateString).toLocaleString();
+};
 
-interface LlamaIndexStats {
-  index: { collection: string; milvus_uri: string; embedding_dimensions: number; total_entities: number };
-  cache: { enabled: boolean; ttl: number; cached_queries: number };
-}
+const truncate = (str: string, length: number) => {
+  if (str.length <= length) return str;
+  return str.substring(0, length) + '...';
+};
 
-interface LlamaIndexConfig {
-  status: string;
-  features: {
-    hybrid_search: boolean;
-    multiple_chunking: boolean;
-    query_cache: boolean;
-    custom_embeddings: boolean;
-  };
-  chunk_strategies: string[];
-  default_chunk_strategy: string;
-  default_top_k: number;
-}
+const getScoreColor = (score: number) => {
+  if (score >= 0.8) return '#10b981';
+  if (score >= 0.5) return '#f59e0b';
+  return '#64748b';
+};
 
-interface LlamaIndexConfig {
-  status: string;
-  features: {
-    hybrid_search: boolean;
-    multiple_chunking: boolean;
-    query_cache: boolean;
-    custom_embeddings: boolean;
-  };
-  chunk_strategies: string[];
-  default_chunk_strategy: string;
-  default_top_k: number;
-}
+const getScoreLabel = (score: number) => {
+  if (score >= 0.8) return 'High';
+  if (score >= 0.5) return 'Medium';
+  return 'Low';
+};
 
-interface RagStats {
-  vector_store: { collection: string; total_entities: number; fields: string[] };
-  documents: { total_count: number; selected_count: number; unselected_count: number };
-  conversations: { total_count: number };
-}
-
-interface UploadTask {
-  task_id: string;
-  status: string;
-  files: string[];
-}
+// ============== Icons ==============
+const Icons = {
+  Chat: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  ),
+  File: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+    </svg>
+  ),
+  Search: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8"/>
+      <path d="M21 21l-4.35-4.35"/>
+    </svg>
+  ),
+  Cpu: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+      <rect x="9" y="9" width="6" height="6"/>
+      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>
+    </svg>
+  ),
+  Plus: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5v14M5 12h14"/>
+    </svg>
+  ),
+  Trash: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+    </svg>
+  ),
+  Refresh: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 4v6h-6M1 20v-6h6"/>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  ),
+  ArrowLeft: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+  ),
+  Send: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+    </svg>
+  ),
+  X: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6L6 18M6 6l12 12"/>
+    </svg>
+  ),
+  Check: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6L9 17l-5-5"/>
+    </svg>
+  ),
+  ChevronRight: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18l6-6-6-6"/>
+    </svg>
+  ),
+  Menu: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h18M3 6h18M3 18h18"/>
+    </svg>
+  ),
+  Database: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3"/>
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+    </svg>
+  ),
+  Settings: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  ),
+  Eye: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
+  ),
+  Edit: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    </svg>
+  ),
+};
 
 // ============== Main Component ==============
-
 export default function RagtestPage() {
-  const [activeTab, setActiveTab] = useState<'rag' | 'llamaindex'>('rag');
+  // UI State
+  const [activeView, setActiveView] = useState<'chat' | 'sources' | 'search' | 'models'>('chat');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
-  // Search state
+  // Chat State
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [currentChatMessages, setCurrentChatMessages] = useState<ChatMessage[]>([]);
+  const [selectedChatMessages, setSelectedChatMessages] = useState<ChatMessage[]>([]);
+  
+  // Chat Input State
+  const [chatInput, setChatInput] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Sources State
+  const [sources, setSources] = useState<Source[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [isReindexing, setIsReindexing] = useState(false);
+
+  // RAG Search State
   const [query, setQuery] = useState('');
   const [isSearching, setIsSearching] = useState(false);
-  const [results, setResults] = useState<RagResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [searchResults, setSearchResults] = useState<RagResponse | null>(null);
 
-  // Data
+  // Models State
+  const [models, setModels] = useState<Model[]>([]);
+
+  // Stats State
   const [vectorStats, setVectorStats] = useState<VectorStats | null>(null);
-  const [sources, setSources] = useState<Source[]>([]);
-  const [ragStats, setRagStats] = useState<RagStats | null>(null);
-  const [chats, setChats] = useState<AdminConversation[]>([]);
-  const [selectedModel, setSelectedModel] = useState('');
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
-  const [llamaStats, setLlamaStats] = useState<LlamaIndexStats | null>(null);
-  const [llamaConfig, setLlamaConfig] = useState<LlamaIndexConfig | null>(null);
 
-  // Upload state
-  const [uploadFiles, setUploadFiles] = useState<FileList | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-  const [uploadMessage, setUploadMessage] = useState('');
-  const [uploadTaskId, setUploadTaskId] = useState<string | null>(null);
-  const [uploadStatus, setUploadStatus] = useState<string>('');
-
-  // Chat rename state
+  // Modal State
+  const [viewingChatId, setViewingChatId] = useState<string | null>(null);
   const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
   const [newChatName, setNewChatName] = useState('');
 
-  // Current chat ID
-  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
-
-  // LlamaIndex
-  const [llamaQuery, setLlamaQuery] = useState('');
-  const [llamaTopK, setLlamaTopK] = useState(10);
-  const [llamaResults, setLlamaResults] = useState<any>(null);
-  const [isLlamaSearching, setIsLlamaSearching] = useState(false);
-
-  // Modal
-  const [viewingChatId, setViewingChatId] = useState<string | null>(null);
-  const [selectedChatMessages, setSelectedChatMessages] = useState<ChatMessage[]>([]);
-
-  // Loading states
-  const [isLoading, setIsLoading] = useState(true);
-
-  // ============== Effects ==============
-
-  useEffect(() => {
-    fetchAllData();
+  // Show toast notification
+  const showToast = useCallback((message: string, type: 'success' | 'error') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
   }, []);
 
-  // ============== Fetch Functions ==============
-
-  const fetchAllData = async () => {
-    setIsLoading(true);
+  // ============== API Functions ==============
+  const fetchChats = useCallback(async () => {
     try {
-      await Promise.all([
-        fetchVectorStats(),
-        fetchSources(),
-        fetchModels(),
-        fetchChats(),
-        fetchRagStats(),
-        fetchLlamaStats(),
-        fetchLlamaConfig(),
-        fetchCurrentChatId()
-      ]);
-    } finally {
-      setIsLoading(false);
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`);
+      if (res.ok) {
+        const data = await res.json();
+        const chatList = (data.data || []).map((id: string) => ({ chat_id: id, name: id }));
+        setChats(chatList);
+      }
+    } catch (err) {
+      console.error('Error fetching chats:', err);
+    }
+  }, []);
+
+  const fetchChatMessages = useCallback(async (chatId: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        const messages = (data.data || []).map((msg: any) => ({
+          type: msg.type,
+          content: msg.content
+        }));
+        if (chatId === currentChatId) {
+          setCurrentChatMessages(messages);
+        } else {
+          setSelectedChatMessages(messages);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching chat messages:', err);
+    }
+  }, [currentChatId]);
+
+  const createNewChat = async () => {
+    try {
+      setError(null);
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast('New chat created', 'success');
+        await fetchChats();
+        setCurrentChatId(data.data?.chat_id || null);
+      } else {
+        throw new Error('Failed to create chat');
+      }
+    } catch (err) {
+      showToast('Failed to create new chat', 'error');
     }
   };
 
-  const fetchVectorStats = async () => {
+  const switchCurrentChat = async (chatId: string) => {
     try {
-      const res = await fetch('/api/test/vector-stats');
-      if (res.ok) setVectorStats(await res.json());
-    } catch (err) { console.error(err); }
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/current`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId })
+      });
+      if (res.ok) {
+        setCurrentChatId(chatId);
+        fetchChatMessages(chatId);
+      }
+    } catch (err) {
+      console.error('Error switching chat:', err);
+    }
   };
 
-  const fetchSources = async () => {
+  const deleteChat = async (chatId: string) => {
+    if (!confirm(`Delete chat "${truncate(chatId, 20)}"?`)) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}`, { method: 'DELETE' });
+      if (res.ok) {
+        showToast('Chat deleted', 'success');
+        if (currentChatId === chatId) {
+          setCurrentChatId(null);
+          setCurrentChatMessages([]);
+        }
+        await fetchChats();
+      }
+    } catch (err) {
+      showToast('Failed to delete chat', 'error');
+    }
+  };
+
+  const clearAllChats = async () => {
+    if (!confirm('Delete ALL chats? This cannot be undone.')) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`, { method: 'DELETE' });
+      if (res.ok) {
+        showToast('All chats cleared', 'success');
+        setChats([]);
+        setCurrentChatId(null);
+        setCurrentChatMessages([]);
+      }
+    } catch (err) {
+      showToast('Failed to clear chats', 'error');
+    }
+  };
+
+  const renameChat = async (chatId: string) => {
+    if (!newChatName.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newChatName })
+      });
+      if (res.ok) {
+        setRenamingChatId(null);
+        setNewChatName('');
+        await fetchChats();
+        showToast('Chat renamed', 'success');
+      }
+    } catch (err) {
+      showToast('Failed to rename chat', 'error');
+    }
+  };
+
+  // Source APIs
+  const fetchSources = useCallback(async () => {
     try {
       const [allRes, selectedRes] = await Promise.all([
-        fetch('/api/sources'),
-        fetch('/api/selected_sources')
+        fetch(`${API_BASE_URL}/api/v1/sources`),
+        fetch(`${API_BASE_URL}/api/v1/selected-sources`)
       ]);
-      const allSources = (await allRes.json()).sources || [];
-      const selectedSources = (await selectedRes.json()).sources || [];
-      setSources(allSources.map((name: string) => ({ name, selected: selectedSources.includes(name) })));
-    } catch (err) { console.error(err); }
-  };
+      const allSources = (await allRes.json()).data || [];
+      const selected = (await selectedRes.json()).data || [];
+      setSources(allSources.map((name: string) => ({ name, selected: selected.includes(name) })));
+      setSelectedSources(selected);
+    } catch (err) {
+      console.error('Error fetching sources:', err);
+    }
+  }, []);
 
-  const fetchModels = async () => {
+  const toggleSource = async (sourceName: string) => {
+    const newSelected = selectedSources.includes(sourceName)
+      ? selectedSources.filter(s => s !== sourceName)
+      : [...selectedSources, sourceName];
     try {
-      const [modelsRes, selectedRes] = await Promise.all([
-        fetch('/api/available_models'),
-        fetch('/api/selected_model')
-      ]);
-      setAvailableModels((await modelsRes.json()).models || []);
-      setSelectedModel((await selectedRes.json()).model || '');
-    } catch (err) { console.error(err); }
-  };
-
-  const fetchChats = async () => {
-    try {
-      const res = await fetch('/api/admin/conversations');
-      if (res.ok) setChats((await res.json()).conversations || []);
-    } catch (err) { console.error(err); }
-  };
-
-  const fetchRagStats = async () => {
-    try {
-      const res = await fetch('/api/admin/rag/stats');
-      if (res.ok) setRagStats(await res.json());
-    } catch (err) { console.error(err); }
-  };
-
-  const fetchLlamaStats = async () => {
-    try {
-      const res = await fetch('/api/rag/llamaindex/stats');
-      if (res.ok) setLlamaStats(await res.json());
-    } catch (err) { console.error(err); }
-  };
-
-  const fetchLlamaConfig = async () => {
-    try {
-      const res = await fetch('/api/rag/llamaindex/config');
-      if (res.ok) setLlamaConfig(await res.json());
-    } catch (err) { console.error(err); }
-  };
-
-  const fetchCurrentChatId = async () => {
-    try {
-      const res = await fetch('/api/chat_id');
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: newSelected })
+      });
       if (res.ok) {
-        const data = await res.json();
-        setCurrentChatId(data.chat_id);
+        setSelectedSources(newSelected);
+        setSources(sources.map(s => ({ ...s, selected: newSelected.includes(s.name) })));
       }
-    } catch (err) { console.error(err); }
+    } catch (err) {
+      showToast('Failed to update source selection', 'error');
+    }
   };
 
-  // ============== Handler Functions ==============
+  const selectAllSources = async () => {
+    const allSourceNames = sources.map(s => s.name);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: allSourceNames })
+      });
+      if (res.ok) {
+        setSelectedSources(allSourceNames);
+        setSources(sources.map(s => ({ ...s, selected: true })));
+      }
+    } catch (err) {
+      showToast('Failed to select all sources', 'error');
+    }
+  };
 
-  const handleSearch = async (e: React.FormEvent) => {
+  const deselectAllSources = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: [] })
+      });
+      if (res.ok) {
+        setSelectedSources([]);
+        setSources(sources.map(s => ({ ...s, selected: false })));
+      }
+    } catch (err) {
+      showToast('Failed to deselect sources', 'error');
+    }
+  };
+
+  const reindexSources = async () => {
+    if (selectedSources.length === 0) {
+      showToast('Please select at least one source to reindex', 'error');
+      return;
+    }
+    setIsReindexing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/sources:reindex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: selectedSources })
+      });
+      if (res.ok) {
+        showToast('Reindexing started', 'success');
+      }
+    } catch (err) {
+      showToast('Failed to start reindexing', 'error');
+    } finally {
+      setIsReindexing(false);
+    }
+  };
+
+  // RAG Search
+  const performRagSearch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!query.trim() || isSearching) return;
     setIsSearching(true);
     setError(null);
-    setResults(null);
+    setSearchResults(null);
     try {
-      const res = await fetch(`/api/test/rag?query=${encodeURIComponent(query)}&k=8`);
+      const res = await fetch(`${API_BASE_URL}/api/test/rag?query=${encodeURIComponent(query)}&k=8`);
       if (!res.ok) throw new Error('Search failed');
-      setResults(await res.json());
+      setSearchResults(await res.json());
     } catch (err) {
-      setError('Search failed. Please try again.');
+      showToast('RAG search failed', 'error');
     } finally {
       setIsSearching(false);
     }
   };
 
-  const handleLlamaSearch = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!llamaQuery.trim() || isLlamaSearching) return;
-    setIsLlamaSearching(true);
-    setLlamaResults(null);
+  // Models API
+  const fetchModels = useCallback(async () => {
     try {
-      const res = await fetch('/api/rag/llamaindex/query', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: llamaQuery, top_k: llamaTopK })
-      });
-      if (!res.ok) throw new Error('Query failed');
-      setLlamaResults(await res.json());
+      const res = await fetch(`${API_BASE_URL}/v1/models`);
+      if (res.ok) {
+        const data = await res.json();
+        setModels(data.data || []);
+      }
     } catch (err) {
-      setError('LlamaIndex query failed.');
-    } finally {
-      setIsLlamaSearching(false);
+      console.error('Error fetching models:', err);
     }
-  };
+  }, []);
 
-  const handleSourceToggle = async (sourceName: string) => {
-    const currentSelected = sources.filter(s => s.selected).map(s => s.name);
-    const newSelected = currentSelected.includes(sourceName)
-      ? currentSelected.filter(s => s !== sourceName)
-      : [...currentSelected, sourceName];
+  const fetchVectorStats = useCallback(async () => {
     try {
-      await fetch('/api/selected_sources', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newSelected)
-      });
-      fetchSources();
-      fetchRagStats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleModelChange = async (newModel: string) => {
-    try {
-      await fetch('/api/selected_model', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model: newModel })
-      });
-      setSelectedModel(newModel);
-    } catch (err) { console.error(err); }
-  };
-
-  const handleSelectAll = async () => {
-    try {
-      await fetch('/api/admin/rag/sources/select-all', { method: 'POST' });
-      fetchSources();
-      fetchRagStats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleDeselectAll = async () => {
-    try {
-      await fetch('/api/admin/rag/sources/deselect-all', { method: 'POST' });
-      fetchSources();
-      fetchRagStats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleDeleteSource = async (sourceName: string) => {
-    if (!confirm(`Delete source "${sourceName}"? This will also delete all vectors from the vector database. This cannot be undone.`)) return;
-    try {
-      const res = await fetch(`/api/collections/${encodeURIComponent(sourceName)}`, { method: 'DELETE' });
-      const data = await res.json();
-      if (res.ok) {
-        alert(`Deleted: ${sourceName}`);
-      } else {
-        alert(`Error: ${data.detail || 'Unknown error'}`);
-      }
-      // Refresh all data after deletion
-      fetchSources();
-      fetchRagStats();
-      fetchVectorStats();
-    } catch (err) { 
-      console.error(err);
-      alert('Failed to delete source');
+      const res = await fetch(`${API_BASE_URL}/api/test/vector-stats`);
+      if (res.ok) setVectorStats(await res.json());
+    } catch (err) {
+      console.error('Error fetching vector stats:', err);
     }
-  };
+  }, []);
 
-  const handleNewChat = async () => {
-    try {
-      await fetch('/api/chat/new', { method: 'POST' });
-      fetchChats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleDeleteChat = async (chatId: string) => {
-    if (!confirm('Delete this chat?')) return;
-    try {
-      await fetch(`/api/chat/${chatId}`, { method: 'DELETE' });
-      fetchChats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleClearAllChats = async () => {
-    if (!confirm('Delete ALL chats? This cannot be undone.')) return;
-    try {
-      await fetch('/api/chats/clear', { method: 'DELETE' });
-      fetchChats();
-    } catch (err) { console.error(err); }
-  };
-
-  const handleViewChatMessages = async (chatId: string) => {
-    try {
-      const res = await fetch(`/api/admin/conversations/${chatId}/messages`);
-      if (res.ok) {
-        setSelectedChatMessages((await res.json()).messages || []);
-        setViewingChatId(chatId);
-      }
-    } catch (err) { console.error(err); }
-  };
-
-  const handleClearCache = async () => {
-    try {
-      await fetch('/api/rag/llamaindex/cache/clear', { method: 'POST' });
-      fetchLlamaStats();
-      alert('Cache cleared');
-    } catch (err) { console.error(err); }
-  };
-
-  // File upload handler
-  const handleFileUpload = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!uploadFiles || uploadFiles.length === 0) return;
-
-    setIsUploading(true);
-    setUploadMessage('');
-    setUploadStatus('');
-
-    try {
-      const formData = new FormData();
-      for (let i = 0; i < uploadFiles.length; i++) {
-        formData.append('files', uploadFiles[i]);
-      }
-
-      const res = await fetch('/api/ingest', {
-        method: 'POST',
-        body: formData
-      });
-
-      const data = await res.json();
-      setUploadMessage(data.message || 'Files uploaded');
-      setUploadTaskId(data.task_id);
-      setUploadStatus(data.status);
-
-      // Poll for status if task_id exists
-      if (data.task_id) {
-        const pollStatus = async () => {
-          const statusRes = await fetch(`/api/ingest/status/${data.task_id}`);
-          if (statusRes.ok) {
-            const statusData = await statusRes.json();
-            setUploadStatus(statusData.status);
-            if (statusData.status === 'completed' || statusData.status === 'failed') {
-              return;
+  // ============== Effects ==============
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoading(true);
+      try {
+        await Promise.all([
+          fetchChats(),
+          fetchSources(),
+          fetchModels(),
+          fetchVectorStats()
+        ]);
+        // Fetch current chat after other data
+        const currentRes = await fetch(`${API_BASE_URL}/api/v1/chats/current`);
+        if (currentRes.ok) {
+          const data = await currentRes.json();
+          const chatId = data.data?.chat_id || null;
+          setCurrentChatId(chatId);
+          if (chatId) {
+            const msgRes = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/messages`);
+            if (msgRes.ok) {
+              const msgData = await msgRes.json();
+              const messages = (msgData.data || []).map((msg: any) => ({
+                type: msg.type,
+                content: msg.content
+              }));
+              setCurrentChatMessages(messages);
             }
-            setTimeout(pollStatus, 2000);
           }
-        };
-        setTimeout(pollStatus, 2000);
+        }
+      } finally {
+        setIsLoading(false);
       }
+    };
+    loadData();
+  }, []);
 
-      fetchSources();
-      fetchRagStats();
-      fetchVectorStats();
-    } catch (err) {
-      setUploadMessage('Upload failed: ' + String(err));
-    } finally {
-      setIsUploading(false);
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
+  }, [currentChatMessages]);
+
+  // WebSocket for real-time chat
+  useEffect(() => {
+    if (!currentChatId) return;
+
+    const wsProtocol = 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${API_BASE_URL.replace('http://', '')}/ws/chat/${currentChatId}?heartbeat=30`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      const type = msg.type;
+      const text = msg.data ?? msg.token ?? '';
+
+      switch (type) {
+        case 'history':
+          if (Array.isArray(msg.messages)) {
+            const msgs = msg.messages.map((m: any) => ({ type: m.type, content: m.content }));
+            setCurrentChatMessages(msgs);
+          }
+          setIsStreaming(false);
+          break;
+        case 'token':
+          if (text) {
+            setCurrentChatMessages(prev => {
+              const msgs = [...prev];
+              const last = msgs[msgs.length - 1];
+              if (last && last.type === 'AIMessage') {
+                last.content += text;
+              } else {
+                msgs.push({ type: 'AIMessage', content: text });
+              }
+              return msgs;
+            });
+          }
+          break;
+        case 'node_start':
+          if (msg?.data === 'generate') {
+            setIsStreaming(true);
+          }
+          break;
+        case 'node_end':
+        case 'stopped':
+          setIsStreaming(false);
+          break;
+        case 'error':
+          showToast(msg.message || 'An error occurred', 'error');
+          setIsStreaming(false);
+          break;
+      }
+    };
+
+    ws.onerror = () => {
+      showToast('WebSocket connection error', 'error');
+      setIsStreaming(false);
+    };
+
+    ws.onclose = () => {
+      setIsStreaming(false);
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [currentChatId, showToast]);
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || isStreaming || !wsRef.current) return;
+    wsRef.current.send(JSON.stringify({ message: chatInput }));
+    setCurrentChatMessages(prev => [...prev, { type: 'HumanMessage', content: chatInput }]);
+    setChatInput('');
   };
 
-  // Chat rename handler
-  const handleRenameChat = async (chatId: string) => {
-    if (!newChatName.trim()) return;
-    try {
-      await fetch('/api/chat/rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ chat_id: chatId, new_name: newChatName })
-      });
-      setRenamingChatId(null);
-      setNewChatName('');
-      fetchChats();
-    } catch (err) { console.error(err); }
-  };
+  // ============== Render Helpers ==============
+  const selectedSourcesList = sources.filter(s => s.selected);
+  const unselectedSourcesList = sources.filter(s => !s.selected);
 
-  const startRename = (chatId: string, currentName: string) => {
-    setRenamingChatId(chatId);
-    setNewChatName(currentName);
-  };
-
-  const selectedSources = sources.filter(s => s.selected);
-  const unselectedSources = sources.filter(s => !s.selected);
-
-  // ============== Render ==============
-
+  // Render loading state
   if (isLoading) {
     return (
-      <div className={styles.container}>
-        <div className={styles.loadingContainer}>
-          <div className={styles.spinner}></div>
-          <p>Loading...</p>
+      <div className={styles.pageContainer}>
+        <div className={styles.loadingWrapper}>
+          <div className={styles.spinnerLarge}></div>
+          <p className={styles.loadingText}>Loading RAG System...</p>
         </div>
       </div>
     );
   }
 
   return (
-    <div className={styles.container}>
+    <div className={styles.pageContainer}>
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`${styles.toast} ${toast.type === 'success' ? styles.toastSuccess : styles.toastError}`}>
+          {toast.message}
+        </div>
+      )}
+
       {/* Header */}
-      <div className={styles.header}>
-        <h1 className={styles.title}>RAG System Console</h1>
-        <button 
-          onClick={fetchAllData} 
-          className={styles.backLink}
-          style={{ background: '#f0f0f0', padding: '6px 12px', cursor: 'pointer' }}
-        >
-          🔄 Refresh All
-        </button>
-        <Link href="/" className={styles.backLink}>Back to Chat</Link>
-      </div>
-
-      {/* Current Session & Upload - Full Width */}
-      <div className={styles.row}>
-        {/* Current Session ID */}
-        <div className={styles.panel}>
-          <h2 className={styles.panelTitle}>Current Session</h2>
-          {currentChatId ? (
-            <div className={styles.infoList}>
-              <div className={styles.infoItem}>
-                <span className={styles.infoLabel}>Chat ID</span>
-                <span className={styles.infoValue} style={{ fontSize: '12px', fontFamily: 'monospace' }}>{currentChatId}</span>
-              </div>
-            </div>
-          ) : (
-            <p className={styles.emptyState}>No active session</p>
-          )}
-        </div>
-
-        {/* File Upload */}
-        <div className={styles.panel}>
-          <h2 className={styles.panelTitle}>Upload Documents</h2>
-          <form onSubmit={handleFileUpload} style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-            <input
-              type="file"
-              multiple
-              accept=".pdf,.txt,.doc,.docx"
-              onChange={(e) => setUploadFiles(e.target.files)}
-              className={styles.searchInput}
-              style={{ padding: '0.5rem' }}
-            />
-            <button type="submit" className={styles.searchButton} disabled={isUploading || !uploadFiles || uploadFiles.length === 0}>
-              {isUploading ? 'Uploading...' : 'Upload & Index'}
-            </button>
-          </form>
-          {uploadMessage && (
-            <div style={{ marginTop: '0.5rem', fontSize: '13px', color: uploadStatus === 'completed' ? 'green' : uploadStatus === 'failed' ? 'red' : '#666' }}>
-              {uploadMessage}
-              {uploadStatus && ` (${uploadStatus})`}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Search Panel - Full Width */}
-      <div className={`${styles.panel} ${styles.fullWidth}`}>
-        <div className={styles.tabs}>
-          <button className={`${styles.tab} ${activeTab === 'rag' ? styles.active : ''}`} onClick={() => setActiveTab('rag')}>
-            Standard RAG
-          </button>
-          <button className={`${styles.tab} ${activeTab === 'llamaindex' ? styles.active : ''}`} onClick={() => setActiveTab('llamaindex')}>
-            LlamaIndex RAG
-          </button>
-        </div>
-
-        {activeTab === 'rag' ? (
-          <>
-            <form onSubmit={handleSearch} className={styles.searchForm}>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Enter search query..."
-                  className={styles.searchInput}
-                  style={{ flex: 1 }}
-                />
-                <button type="submit" className={styles.searchButton} disabled={isSearching || !query.trim()}>
-                  {isSearching ? 'Searching...' : 'Search'}
-                </button>
-              </div>
-            </form>
-
-            {results && (
-              <div className={styles.resultsContainer}>
-                {results.answer && (
-                  <div className={styles.answerSection}>
-                    <div className={styles.answerLabel}>Generated Answer</div>
-                    <div className={styles.answerContent}>{results.answer}</div>
-                  </div>
-                )}
-
-                {results.retrieval_metadata && (
-                  <div className={styles.retrievalMeta}>
-                    <div className={styles.metaItem}>
-                      <div className={styles.metaValue}>{results.retrieval_metadata.total_chunks_retrieved}</div>
-                      <div className={styles.metaLabel}>Chunks</div>
-                    </div>
-                    <div className={styles.metaItem}>
-                      <div className={styles.metaValue}>{results.retrieval_metadata.unique_sources_count}</div>
-                      <div className={styles.metaLabel}>Sources</div>
-                    </div>
-                    <div className={styles.metaItem}>
-                      <div className={styles.metaValue}>{(results.retrieval_metadata.score_range.avg * 100).toFixed(1)}%</div>
-                      <div className={styles.metaLabel}>Avg Score</div>
-                    </div>
-                  </div>
-                )}
-
-                {results.sources?.map((src, idx) => (
-                  <div key={idx} className={styles.resultItem} style={{ marginTop: '1rem' }}>
-                    <div className={styles.resultHeader}>
-                      <span className={styles.resultTitle}>{src.name}</span>
-                      <span className={styles.resultScore}>{(src.max_score * 100).toFixed(1)}%</span>
-                    </div>
-                    <div className={styles.resultChunkCount}>{src.chunk_count} chunks</div>
-                    {src.chunks?.[0] && <div className={styles.resultContent}>{src.chunks[0].excerpt}</div>}
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        ) : (
-          <>
-            <form onSubmit={handleLlamaSearch} className={styles.searchForm}>
-              <div style={{ display: 'flex', gap: '0.5rem' }}>
-                <input
-                  type="text"
-                  value={llamaQuery}
-                  onChange={(e) => setLlamaQuery(e.target.value)}
-                  placeholder="Enter query for LlamaIndex..."
-                  className={styles.searchInput}
-                  style={{ flex: 1 }}
-                />
-                <select
-                  value={llamaTopK}
-                  onChange={(e) => setLlamaTopK(Number(e.target.value))}
-                  className={styles.select}
-                  style={{ width: '100px' }}
-                >
-                  <option value={5}>Top 5</option>
-                  <option value={10}>Top 10</option>
-                  <option value={20}>Top 20</option>
-                </select>
-                <button type="submit" className={styles.searchButton} disabled={isLlamaSearching || !llamaQuery.trim()}>
-                  {isLlamaSearching ? 'Querying...' : 'Query'}
-                </button>
-              </div>
-            </form>
-
-            {llamaResults && (
-              <div className={styles.resultsContainer}>
-                {llamaResults.answer && (
-                  <div className={styles.answerSection}>
-                    <div className={styles.answerLabel}>Generated Answer</div>
-                    <div className={styles.answerContent}>{llamaResults.answer}</div>
-                  </div>
-                )}
-                {llamaResults.sources?.map((src: any, idx: number) => (
-                  <div key={idx} className={styles.resultItem} style={{ marginTop: '1rem' }}>
-                    <div className={styles.resultHeader}>
-                      <span className={styles.resultTitle}>{src.name}</span>
-                    </div>
-                    <div className={styles.resultContent}>{src.excerpt}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-
-      {/* Knowledge Sources - Full Width - Most Important */}
-      <div className={`${styles.panel} ${styles.fullWidth}`}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h2 className={styles.panelTitle} style={{ margin: 0 }}>
-            Knowledge Sources ({sources.length})
-          </h2>
-          <div className={styles.buttonGroup}>
-            <button onClick={handleSelectAll} className={`${styles.button} ${styles.buttonPrimary}`}>Select All</button>
-            <button onClick={handleDeselectAll} className={`${styles.button} ${styles.buttonSecondary}`}>Deselect All</button>
-            <button onClick={fetchSources} className={`${styles.button} ${styles.buttonSecondary}`}>Refresh</button>
-          </div>
-        </div>
-
-        {/* Selected Sources */}
-        <div className={styles.sourceSection}>
-          <div className={styles.sourceSectionHeader}>
-            <span className={styles.sourceSectionTitle}>Active Sources ({selectedSources.length})</span>
-            <span className={`${styles.sourceCount} ${styles.selected}`}>{selectedSources.length} selected</span>
-          </div>
-          {selectedSources.length > 0 ? (
-            <div className={styles.sourcesList}>
-              {selectedSources.map(source => (
-                <div key={source.name} className={`${styles.sourceItem} ${styles.selected}`}>
-                  <input
-                    type="checkbox"
-                    className={styles.sourceCheckbox}
-                    checked={true}
-                    onChange={() => handleSourceToggle(source.name)}
-                  />
-                  <span className={styles.sourceName}>{source.name}</span>
-                  <button className={styles.deleteBtn} onClick={() => handleDeleteSource(source.name)} title="Delete">Delete</button>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className={styles.emptyState}><p>No sources selected. Select sources below for RAG search.</p></div>
-          )}
-        </div>
-
-        {/* Unselected Sources */}
-        {unselectedSources.length > 0 && (
-          <div className={styles.sourceSection}>
-            <div className={styles.sourceSectionHeader}>
-              <span className={styles.sourceSectionTitle}>Available Sources ({unselectedSources.length})</span>
-              <span className={`${styles.sourceCount} ${styles.unselected}`}>{unselectedSources.length} available</span>
-            </div>
-            <div className={styles.sourcesList} style={{ maxHeight: '200px' }}>
-              {unselectedSources.map(source => (
-                <div key={source.name} className={styles.sourceItem}>
-                  <input
-                    type="checkbox"
-                    className={styles.sourceCheckbox}
-                    checked={false}
-                    onChange={() => handleSourceToggle(source.name)}
-                  />
-                  <span className={styles.sourceName}>{source.name}</span>
-                  <button className={styles.deleteBtn} onClick={() => handleDeleteSource(source.name)} title="Delete">Delete</button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Stats Row */}
-      <div className={styles.row}>
-        {/* Vector Stats */}
-        <div className={styles.panel}>
-          <h2 className={styles.panelTitle}>Vector Database</h2>
-          <div className={styles.statsGrid}>
-            <div className={styles.statCard}>
-              <div className={styles.statValue}>{vectorStats?.total_entities?.toLocaleString() || '0'}</div>
-              <div className={styles.statLabel}>Total Vectors</div>
-            </div>
-            <div className={styles.statCard}>
-              <div className={styles.statValue}>{ragStats?.documents.total_count || '0'}</div>
-              <div className={styles.statLabel}>Total Docs</div>
-            </div>
-            <div className={styles.statCard}>
-              <div className={styles.statValue} style={{ color: selectedSources.length > 0 ? 'green' : 'orange' }}>
-                {selectedSources.length}
-              </div>
-              <div className={styles.statLabel}>Selected</div>
-            </div>
-            <div className={styles.statCard}>
-              <div className={styles.statValue}>{ragStats?.conversations.total_count || '0'}</div>
-              <div className={styles.statLabel}>Sessions</div>
-            </div>
-          </div>
-          {/* Vector Details */}
-          {vectorStats && (
-            <div className={styles.infoList} style={{ marginTop: '1rem' }}>
-              <div className={styles.infoItem}>
-                <span className={styles.infoLabel}>💡 Tip</span>
-                <span className={styles.infoValue} style={{ fontSize: '12px' }}>
-                  {selectedSources.length === 0 ? 'Select sources below to enable RAG search!' : `${selectedSources.length} sources selected for search`}
-                </span>
-              </div>
-              <div className={styles.infoItem}>
-                <span className={styles.infoLabel}>Avg Vectors/Doc</span>
-                <span className={styles.infoValue}>
-                  {ragStats?.documents.total_count ? 
-                    Math.round(vectorStats.total_entities / ragStats.documents.total_count).toLocaleString() 
-                    : '0'}
-                </span>
-              </div>
-              <div className={styles.infoItem}>
-                <span className={styles.infoLabel}>Status</span>
-                <span className={styles.infoValue} style={{ color: vectorStats.total_entities > 0 ? 'green' : 'orange' }}>
-                  {vectorStats.total_entities > 0 ? '✓ Ready' : '⚠ Empty'}
-                </span>
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* Model Management */}
-        <div className={styles.panel}>
-          <h2 className={styles.panelTitle}>Model</h2>
-          <select
-            value={selectedModel}
-            onChange={(e) => handleModelChange(e.target.value)}
-            className={styles.select}
+      <header className={styles.header}>
+        <div className={styles.headerLeft}>
+          <button 
+            className={styles.menuButton}
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label="Toggle sidebar"
           >
-            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
-          <div className={styles.infoList} style={{ marginTop: '1rem' }}>
-            <div className={styles.infoItem}><span className={styles.infoLabel}>Available</span><span className={styles.infoValue}>{availableModels.length}</span></div>
-            <div className={styles.infoItem}><span className={styles.infoLabel}>Current</span><span className={styles.infoValue}>{selectedModel || 'None'}</span></div>
+            <Icons.Menu />
+          </button>
+          <div className={styles.logo}>
+            <span className={styles.logoIcon}>⚡</span>
+            <span className={styles.logoText}>RAG Console</span>
           </div>
         </div>
-      </div>
+        
+        <div className={styles.headerRight}>
+          <Link href="/" className={styles.headerLink}>
+            <Icons.ArrowLeft />
+            <span>Back to Chat</span>
+          </Link>
+          <button 
+            className={styles.iconButton}
+            onClick={() => window.location.reload()}
+            aria-label="Refresh"
+          >
+            <Icons.Refresh />
+          </button>
+        </div>
+      </header>
 
-      {/* Session Management */}
-      <div className={`${styles.panel} ${styles.fullWidth}`}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-          <h2 className={styles.panelTitle} style={{ margin: 0 }}>Sessions ({chats.length})</h2>
-          <div className={styles.buttonGroup}>
-            <button onClick={handleNewChat} className={`${styles.button} ${styles.buttonPrimary}`}>New Chat</button>
-            <button onClick={handleClearAllChats} className={`${styles.button} ${styles.buttonDanger}`}>Clear All</button>
+      <div className={styles.mainContainer}>
+        {/* Sidebar */}
+        <aside className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : styles.sidebarClosed}`}>
+          {/* Stats Card */}
+          <div className={styles.statsCard}>
+            <div className={styles.statsHeader}>
+              <Icons.Database />
+              <span>System Status</span>
+            </div>
+            <div className={styles.statsGrid}>
+              <div className={styles.statItem}>
+                <span className={styles.statValue}>{vectorStats?.total_entities?.toLocaleString() || '0'}</span>
+                <span className={styles.statLabel}>Vectors</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={styles.statValue}>{sources.length}</span>
+                <span className={styles.statLabel}>Sources</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={`${styles.statValue} ${selectedSources.length > 0 ? styles.active : ''}`}>
+                  {selectedSources.length}
+                </span>
+                <span className={styles.statLabel}>Active</span>
+              </div>
+              <div className={styles.statItem}>
+                <span className={styles.statValue}>{chats.length}</span>
+                <span className={styles.statLabel}>Sessions</span>
+              </div>
+            </div>
           </div>
-        </div>
-        {chats.length > 0 ? (
-          <div className={styles.chatList} style={{ maxHeight: '200px' }}>
-            {chats.map(chat => (
-              <div key={chat.chat_id} className={styles.chatItem}>
-                {renamingChatId === chat.chat_id ? (
-                  <div style={{ display: 'flex', gap: '0.5rem', flex: 1, alignItems: 'center' }}>
+
+          {/* Navigation */}
+          <nav className={styles.nav}>
+            <button 
+              className={`${styles.navItem} ${activeView === 'chat' ? styles.navItemActive : ''}`}
+              onClick={() => setActiveView('chat')}
+            >
+              <Icons.Chat />
+              <span>Chat Sessions</span>
+              <span className={styles.navBadge}>{chats.length}</span>
+            </button>
+            <button 
+              className={`${styles.navItem} ${activeView === 'sources' ? styles.navItemActive : ''}`}
+              onClick={() => setActiveView('sources')}
+            >
+              <Icons.File />
+              <span>Knowledge Sources</span>
+              <span className={styles.navBadge}>{sources.length}</span>
+            </button>
+            <button 
+              className={`${styles.navItem} ${activeView === 'search' ? styles.navItemActive : ''}`}
+              onClick={() => setActiveView('search')}
+            >
+              <Icons.Search />
+              <span>RAG Search</span>
+            </button>
+            <button 
+              className={`${styles.navItem} ${activeView === 'models' ? styles.navItemActive : ''}`}
+              onClick={() => setActiveView('models')}
+            >
+              <Icons.Cpu />
+              <span>Models</span>
+              <span className={styles.navBadge}>{models.length}</span>
+            </button>
+          </nav>
+
+          {/* Quick Actions */}
+          <div className={styles.quickActions}>
+            <button className={styles.primaryButton} onClick={createNewChat}>
+              <Icons.Plus />
+              New Session
+            </button>
+            <button className={styles.secondaryButton} onClick={selectAllSources}>
+              Select All Sources
+            </button>
+            <button className={styles.secondaryButton} onClick={deselectAllSources}>
+              Deselect All
+            </button>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className={styles.content}>
+          
+          {/* Chat Sessions View */}
+          {activeView === 'chat' && (
+            <div className={styles.splitView}>
+              {/* Sessions List */}
+              <div className={styles.listPanel}>
+                <div className={styles.panelHeader}>
+                  <h2>Conversations</h2>
+                  <button className={styles.textButton} onClick={clearAllChats}>
+                    Clear All
+                  </button>
+                </div>
+                <div className={styles.listContent}>
+                  {chats.length > 0 ? (
+                    chats.map(chat => (
+                      <div 
+                        key={chat.chat_id} 
+                        className={`${styles.listItem} ${currentChatId === chat.chat_id ? styles.listItemActive : ''}`}
+                      >
+                        {renamingChatId === chat.chat_id ? (
+                          <div className={styles.editRow}>
+                            <input
+                              type="text"
+                              value={newChatName}
+                              onChange={(e) => setNewChatName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') renameChat(chat.chat_id);
+                                if (e.key === 'Escape') { setRenamingChatId(null); setNewChatName(''); }
+                              }}
+                              autoFocus
+                              className={styles.editInput}
+                            />
+                            <button onClick={() => renameChat(chat.chat_id)} className={styles.iconBtnSmall}>
+                              <Icons.Check />
+                            </button>
+                            <button onClick={() => { setRenamingChatId(null); setNewChatName(''); }} className={styles.iconBtnSmall}>
+                              <Icons.X />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div 
+                              className={styles.listItemContent}
+                              onClick={() => switchCurrentChat(chat.chat_id)}
+                            >
+                              <div className={styles.listItemIcon}>💬</div>
+                              <div className={styles.listItemInfo}>
+                                <span className={styles.listItemTitle}>{truncate(chat.chat_id, 28)}</span>
+                                <span className={styles.listItemMeta}>{chat.message_count || 0} messages</span>
+                              </div>
+                            </div>
+                            <div className={styles.listItemActions}>
+                              <button onClick={() => { setRenamingChatId(chat.chat_id); setNewChatName(chat.chat_id); }} title="Rename">
+                                <Icons.Edit />
+                              </button>
+                              <button onClick={() => { setViewingChatId(chat.chat_id); fetchChatMessages(chat.chat_id); }} title="View">
+                                <Icons.Eye />
+                              </button>
+                              <button onClick={() => deleteChat(chat.chat_id)} title="Delete">
+                                <Icons.Trash />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptyList}>
+                      <p>No conversations yet</p>
+                      <button className={styles.primaryButton} onClick={createNewChat}>
+                        Start a new chat
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Chat Panel */}
+              <div className={styles.chatPanel}>
+                <div className={styles.chatPanelHeader}>
+                  <h2>{currentChatId ? truncate(currentChatId, 40) : 'Select a conversation'}</h2>
+                  {currentChatId && <span className={styles.liveIndicator}>● Live</span>}
+                </div>
+                <div className={styles.chatMessages}>
+                  {currentChatMessages.map((msg, idx) => (
+                    <div key={idx} className={`${styles.message} ${msg.type === 'HumanMessage' ? styles.messageUser : styles.messageAI}`}>
+                      <div className={styles.messageAvatar}>
+                        {msg.type === 'HumanMessage' ? '👤' : '🤖'}
+                      </div>
+                      <div className={styles.messageContent}>
+                        <div className={styles.messageRole}>{msg.type === 'HumanMessage' ? 'You' : 'Assistant'}</div>
+                        <div className={styles.messageText}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {isStreaming && (
+                    <div className={`${styles.message} ${styles.messageAI}`}>
+                      <div className={styles.messageAvatar}>🤖</div>
+                      <div className={styles.messageContent}>
+                        <div className={styles.messageRole}>Assistant</div>
+                        <div className={styles.typingDots}>
+                          <span></span><span></span><span></span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+                {currentChatId ? (
+                  <form onSubmit={handleSendMessage} className={styles.chatInput}>
                     <input
                       type="text"
-                      value={newChatName}
-                      onChange={(e) => setNewChatName(e.target.value)}
-                      className={styles.searchInput}
-                      style={{ flex: 1, padding: '0.25rem 0.5rem' }}
-                      autoFocus
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleRenameChat(chat.chat_id);
-                        if (e.key === 'Escape') { setRenamingChatId(null); setNewChatName(''); }
-                      }}
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Type your message..."
+                      disabled={isStreaming}
+                      className={styles.chatInputField}
                     />
-                    <button className={styles.chatActionBtn} onClick={() => handleRenameChat(chat.chat_id)}>Save</button>
-                    <button className={styles.chatActionBtn} onClick={() => { setRenamingChatId(null); setNewChatName(''); }}>Cancel</button>
-                  </div>
+                    <button type="submit" disabled={!chatInput.trim() || isStreaming} className={styles.sendBtn}>
+                      <Icons.Send />
+                    </button>
+                  </form>
                 ) : (
-                  <>
-                    <span className={styles.chatItemName}>{chat.name}</span>
-                    <div className={styles.chatItemActions}>
-                      <button className={styles.chatActionBtn} onClick={() => startRename(chat.chat_id, chat.name)}>Rename</button>
-                      <button className={styles.chatActionBtn} onClick={() => handleViewChatMessages(chat.chat_id)}>View</button>
-                      <button className={styles.chatActionBtn} onClick={() => handleDeleteChat(chat.chat_id)}>Delete</button>
-                    </div>
-                  </>
+                  <div className={styles.chatPlaceholder}>
+                    Select or create a conversation to start chatting
+                  </div>
                 )}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className={styles.emptyState}><p>No sessions</p></div>
-        )}
-      </div>
+            </div>
+          )}
 
-      {/* LlamaIndex Info */}
-      <div className={styles.row}>
-        <div className={styles.panel}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-            <h2 className={styles.panelTitle} style={{ margin: 0 }}>LlamaIndex</h2>
-            <button onClick={handleClearCache} className={`${styles.button} ${styles.buttonSecondary}`}>Clear Cache</button>
-          </div>
-          {llamaStats && (
-            <div className={styles.infoList}>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Collection</span><span className={styles.infoValue}>{llamaStats.index.collection}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Embedding Dim</span><span className={styles.infoValue}>{llamaStats.index.embedding_dimensions}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Cache Enabled</span><span className={styles.infoValue}>{llamaStats.cache.enabled ? 'Yes' : 'No'}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Cached Queries</span><span className={styles.infoValue}>{llamaStats.cache.cached_queries}</span></div>
-              {llamaConfig && (
-                <div className={styles.infoList}>
-                  <div className={styles.infoItem}><span className={styles.infoLabel}>Hybrid Search</span><span className={styles.infoValue}>{llamaConfig.features.hybrid_search ? 'Yes' : 'No'}</span></div>
-                  <div className={styles.infoItem}><span className={styles.infoLabel}>Chunk Strategy</span><span className={styles.infoValue}>{llamaConfig.default_chunk_strategy}</span></div>
-                  <div className={styles.infoItem}><span className={styles.infoLabel}>Default Top-K</span><span className={styles.infoValue}>{llamaConfig.default_top_k}</span></div>
+          {/* Knowledge Sources View */}
+          {activeView === 'sources' && (
+            <div className={styles.sourcesView}>
+              <div className={styles.sourceSection}>
+                <div className={styles.sectionHeader}>
+                  <h2>
+                    <span className={styles.countBadge}>{selectedSourcesList.length}</span>
+                    Active Sources
+                  </h2>
+                </div>
+                <div className={styles.sourceGrid}>
+                  {selectedSourcesList.length > 0 ? (
+                    selectedSourcesList.map(source => (
+                      <div key={source.name} className={`${styles.sourceCard} ${styles.sourceCardActive}`}>
+                        <label className={styles.sourceCardLabel}>
+                          <input
+                            type="checkbox"
+                            checked={true}
+                            onChange={() => toggleSource(source.name)}
+                            className={styles.sourceCheckbox}
+                          />
+                          <span className={styles.sourceFileIcon}>📄</span>
+                          <span className={styles.sourceFileName}>{source.name}</span>
+                        </label>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>No active sources</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.sourceSection}>
+                <div className={styles.sectionHeader}>
+                  <h2>
+                    <span className={styles.countBadgeSecondary}>{unselectedSourcesList.length}</span>
+                    Available Sources
+                  </h2>
+                </div>
+                <div className={styles.sourceGrid}>
+                  {unselectedSourcesList.length > 0 ? (
+                    unselectedSourcesList.map(source => (
+                      <div key={source.name} className={styles.sourceCard}>
+                        <label className={styles.sourceCardLabel}>
+                          <input
+                            type="checkbox"
+                            checked={false}
+                            onChange={() => toggleSource(source.name)}
+                            className={styles.sourceCheckbox}
+                          />
+                          <span className={styles.sourceFileIcon}>📄</span>
+                          <span className={styles.sourceFileName}>{source.name}</span>
+                        </label>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>All sources selected</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.actionRow}>
+                <button 
+                  onClick={reindexSources} 
+                  disabled={isReindexing || selectedSources.length === 0}
+                  className={styles.primaryButton}
+                >
+                  <Icons.Refresh />
+                  {isReindexing ? 'Reindexing...' : 'Reindex Selected'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* RAG Search View */}
+          {activeView === 'search' && (
+            <div className={styles.searchView}>
+              <div className={styles.searchBox}>
+                <form onSubmit={performRagSearch} className={styles.searchForm}>
+                  <div className={styles.searchInputGroup}>
+                    <Icons.Search />
+                    <input
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Ask a question about your knowledge base..."
+                      className={styles.searchInput}
+                    />
+                    <button type="submit" disabled={isSearching || !query.trim()} className={styles.searchBtn}>
+                      {isSearching ? 'Searching...' : 'Search'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {searchResults && (
+                <div className={styles.searchResults}>
+                  {/* Answer Section */}
+                  {searchResults.answer && (
+                    <div className={styles.answerSection}>
+                      <div className={styles.sectionTitle}>
+                        <Icons.Chat />
+                        Generated Answer
+                      </div>
+                      <div className={styles.answerText}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {searchResults.answer}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Stats */}
+                  {searchResults.retrieval_metadata && (
+                    <div className={styles.retrievalStats}>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{searchResults.retrieval_metadata.total_chunks_retrieved}</span>
+                        <span className={styles.retrievalStatLabel}>Chunks</span>
+                      </div>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{searchResults.retrieval_metadata.unique_sources_count}</span>
+                        <span className={styles.retrievalStatLabel}>Sources</span>
+                      </div>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{(searchResults.retrieval_metadata.score_range.avg * 100).toFixed(0)}%</span>
+                        <span className={styles.retrievalStatLabel}>Avg Relevance</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sources */}
+                  {searchResults.sources && searchResults.sources.length > 0 && (
+                    <div className={styles.sourcesSection}>
+                      <div className={styles.sectionTitle}>
+                        <Icons.File />
+                        Source Documents
+                      </div>
+                      <div className={styles.sourceResultList}>
+                        {searchResults.sources.map((src, idx) => (
+                          <div key={idx} className={styles.sourceResultCard}>
+                            <div className={styles.sourceResultHeader}>
+                              <span className={styles.sourceResultIndex}>{idx + 1}</span>
+                              <span className={styles.sourceResultName}>{src.name}</span>
+                              <span 
+                                className={styles.sourceResultScore}
+                                style={{ backgroundColor: `${getScoreColor(src.max_score)}20`, color: getScoreColor(src.max_score) }}
+                              >
+                                {getScoreLabel(src.max_score)} {(src.max_score * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div className={styles.sourceResultMeta}>{src.chunk_count} chunks</div>
+                            {src.chunks?.[0] && (
+                              <div className={styles.sourceResultExcerpt}>{src.chunks[0].excerpt}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!searchResults && !isSearching && (
+                <div className={styles.searchEmpty}>
+                  <Icons.Search />
+                  <h3>Search your knowledge base</h3>
+                  <p>Enter a query above to get AI-powered answers with source citations.</p>
+                  <p className={styles.searchHint}>Active sources: {selectedSources.length > 0 ? selectedSources.join(', ') : 'None selected'}</p>
                 </div>
               )}
             </div>
           )}
-        </div>
 
-        <div className={styles.panel}>
-          <h2 className={styles.panelTitle}>System Status</h2>
-          {ragStats && (
-            <div className={styles.infoList}>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Total Docs</span><span className={styles.infoValue}>{ragStats.documents.total_count}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Selected</span><span className={styles.infoValue}>{ragStats.documents.selected_count}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Unselected</span><span className={styles.infoValue}>{ragStats.documents.unselected_count}</span></div>
-              <div className={styles.infoItem}><span className={styles.infoLabel}>Sessions</span><span className={styles.infoValue}>{ragStats.conversations.total_count}</span></div>
+          {/* Models View */}
+          {activeView === 'models' && (
+            <div className={styles.modelsView}>
+              <div className={styles.modelsSection}>
+                <h2 className={styles.sectionTitle}>
+                  <Icons.Cpu />
+                  Available Models
+                </h2>
+                <div className={styles.modelGrid}>
+                  {models.length > 0 ? (
+                    models.map(model => (
+                      <div key={model.id} className={styles.modelCard}>
+                        <div className={styles.modelIcon}>🤖</div>
+                        <div className={styles.modelInfo}>
+                          <span className={styles.modelName}>{model.id}</span>
+                          <span className={styles.modelMeta}>Created: {formatDate(new Date(model.created * 1000).toISOString())}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>No models available</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.modelsSection}>
+                <h2 className={styles.sectionTitle}>
+                  <Icons.Database />
+                  System Statistics
+                </h2>
+                <div className={styles.statsDashboard}>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{vectorStats?.total_entities?.toLocaleString() || '0'}</span>
+                    <span className={styles.statsCardLabel}>Total Vectors</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{sources.length}</span>
+                    <span className={styles.statsCardLabel}>Total Sources</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={`${styles.statsCardValue} ${selectedSources.length > 0 ? styles.active : ''}`}>
+                      {selectedSources.length}
+                    </span>
+                    <span className={styles.statsCardLabel}>Selected</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{chats.length}</span>
+                    <span className={styles.statsCardLabel}>Sessions</span>
+                  </div>
+                </div>
+                {vectorStats && (
+                  <div className={styles.collectionInfo}>
+                    <span className={styles.collectionLabel}>Collection:</span>
+                    <span className={styles.collectionValue}>{vectorStats.collection}</span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
-        </div>
+        </main>
       </div>
 
       {/* Chat Messages Modal */}
       {viewingChatId && (
-        <div style={{
-          position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
-          background: 'rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center',
-          zIndex: 1000
-        }} onClick={() => setViewingChatId(null)}>
-          <div style={{
-            background: 'white', padding: '1.5rem', borderRadius: '12px', maxWidth: '600px', width: '90%',
-            maxHeight: '80vh', overflow: 'auto'
-          }} onClick={e => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>Chat Messages</h3>
-            <div className={styles.messagesContainer}>
-              {selectedChatMessages.map((msg, idx) => (
-                <div key={idx} className={`${styles.message} ${
-                  msg.type === 'HumanMessage' ? styles.messageHuman :
-                  msg.type === 'AIMessage' ? styles.messageAI : styles.messageSystem
-                }`}>
-                  <strong>{msg.type}:</strong> {msg.content}
-                </div>
-              ))}
+        <div className={styles.modalOverlay} onClick={() => setViewingChatId(null)}>
+          <div className={styles.modal} onClick={e => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>Chat Messages</h3>
+              <button onClick={() => setViewingChatId(null)} className={styles.modalClose}>
+                <Icons.X />
+              </button>
             </div>
-            <button onClick={() => setViewingChatId(null)} className={`${styles.button} ${styles.buttonPrimary}`} style={{ marginTop: '1rem' }}>
-              Close
-            </button>
+            <div className={styles.modalBody}>
+              {selectedChatMessages.length > 0 ? (
+                selectedChatMessages.map((msg, idx) => (
+                  <div key={idx} className={`${styles.message} ${msg.type === 'HumanMessage' ? styles.messageUser : styles.messageAI}`}>
+                    <div className={styles.messageAvatar}>{msg.type === 'HumanMessage' ? '👤' : '🤖'}</div>
+                    <div className={styles.messageContent}>
+                      <div className={styles.messageRole}>{msg.type === 'HumanMessage' ? 'You' : 'Assistant'}</div>
+                      <div className={styles.messageText}>{msg.content}</div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className={styles.emptySection}>No messages</div>
+              )}
+            </div>
           </div>
         </div>
       )}
