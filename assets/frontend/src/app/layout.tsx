@@ -33,11 +33,28 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" className="h-full">
-      <body className={`${inter.className} h-full bg-white dark:bg-gray-900 text-gray-900 dark:text-white transition-colors duration-200`}>
+    <html lang="en" className="h-full" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                try {
+                  var savedTheme = localStorage.getItem('theme');
+                  var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+                  if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
+                    document.documentElement.classList.add('dark');
+                  }
+                } catch (e) {}
+              })();
+            `,
+          }}
+        />
+      </head>
+      <body className={`${inter.className} h-full bg-background text-foreground`}>
         <ThemeToggle />
         <TopNav />
-        <main className="pt-14 h-full">
+        <main className="pt-16 pb-16 md:pb-0 h-full">
           {children}
         </main>
       </body>
