@@ -25,6 +25,10 @@ dependencies = [
     "unstructured[pdf]>=0.18.11",
     "uvicorn>=0.35.0",
     "websockets>=15.0.1",
+    # Rate limiting
+    "slowapi>=0.1.9",
+    # JWT authentication
+    "python-jose[cryptography]>=3.3.0",
     # LlamaIndex dependencies for enhanced RAG
     "llama-index-core>=0.13.0",
     "llama-index-vector-stores-milvus>=0.9.4",

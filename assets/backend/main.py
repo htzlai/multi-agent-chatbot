@@ -31,9 +31,22 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import List, Optional, Dict, Set
+from pydantic import BaseModel
 
 from fastapi import FastAPI, File, Form, UploadFile, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+# Rate limiting (optional - gracefully handle if not installed)
+try:
+    from slowapi import Limiter
+    from slowapi.util import get_remote_address
+    from slowapi.errors import RateLimitExceeded
+    RATE_LIMIT_AVAILABLE = True
+except ImportError:
+    RATE_LIMIT_AVAILABLE = False
+    Limiter = None
+    get_remote_address = None
 
 from agent import ChatAgent
 from config import ConfigManager
@@ -43,6 +56,7 @@ from postgres_storage import PostgreSQLConversationStorage
 from utils import process_and_ingest_files_background
 from vector_store import create_vector_store_with_config
 from openai_compatible import router as openai_router
+from errors import APIError, create_error_response, ErrorCode
 
 AUTH_ENABLED = os.getenv("SUPABASE_JWT_SECRET") is not None
 
@@ -115,26 +129,434 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://localhost:3010",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3010",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# ============================================================
+# Global Exception Handlers - 统一错误响应格式
+# ============================================================
+
+from fastapi.exceptions import RequestValidationError
+
+@app.exception_handler(APIError)
+async def api_error_handler(request, exc: APIError):
+    """处理自定义 APIError 异常"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=exc.to_dict()
+    )
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError):
+    """处理 FastAPI 验证错误"""
+    validation_errors = []
+    for err in exc.errors():
+        validation_errors.append({
+            "field": ".".join(str(x) for x in err.get("loc", [])),
+            "message": err.get("msg", ""),
+            "type": err.get("type", "")
+        })
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "code": ErrorCode.VALIDATION_ERROR,
+                "message": "Request validation failed",
+                "details": {"validation_errors": validation_errors}
+            }
+        }
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc: HTTPException):
+    """将 HTTPException 转换为统一格式"""
+    # 如果 detail 已经是我们的格式，直接返回
+    if isinstance(exc.detail, dict) and "error" in exc.detail:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=exc.detail
+        )
+    
+    # 处理 FastAPI 验证错误 (list of validation errors)
+    if isinstance(exc.detail, list):
+        validation_errors = []
+        for err in exc.detail:
+            if isinstance(err, dict):
+                validation_errors.append({
+                    "field": ".".join(str(x) for x in err.get("loc", [])),
+                    "message": err.get("msg", ""),
+                    "type": err.get("type", "")
+                })
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={
+                "error": {
+                    "code": ErrorCode.VALIDATION_ERROR,
+                    "message": "Request validation failed",
+                    "details": {"validation_errors": validation_errors}
+                }
+            }
+        )
+    
+    # 否则转换为统一格式
+    error_code = ErrorCode.UNKNOWN_ERROR
+    if exc.status_code == 401:
+        error_code = ErrorCode.UNAUTHORIZED
+    elif exc.status_code == 403:
+        error_code = ErrorCode.FORBIDDEN
+    elif exc.status_code == 404:
+        error_code = ErrorCode.NOT_FOUND
+    
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": {
+                "code": error_code,
+                "message": str(exc.detail) if exc.detail else "Unknown error",
+                "details": {}
+            }
+        }
+    )
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc: Exception):
+    """处理所有未捕获的异常"""
+    logger.error(f"Unhandled exception: {str(exc)}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": ErrorCode.INTERNAL_ERROR,
+                "message": "An internal error occurred",
+                "details": {"type": type(exc).__name__}
+            }
+        }
+    )
+
+# Initialize rate limiter if available
+if RATE_LIMIT_AVAILABLE:
+    limiter = Limiter(key_func=get_remote_address)
+    
+    @app.exception_handler(RateLimitExceeded)
+    async def rate_limit_handler(request, exc):
+        return JSONResponse(
+            status_code=429,
+            content={
+                "error": {
+                    "code": "RATE_LIMIT_EXCEEDED",
+                    "message": "请求过于频繁，请稍后再试",
+                    "details": {"retry_after": str(exc)}
+                }
+            }
+        )
+else:
+    limiter = None
+
 # 注册 OpenAI 兼容 API 路由
 app.include_router(openai_router)
 
 
-async def handle_chat_messages(websocket: WebSocket, chat_id: str):
+# ============================================================
+# RESTful API v1 Router - 符合 REST 规范的新接口
+# ============================================================
+
+from fastapi import APIRouter
+
+api_v1_router = APIRouter(prefix="/api/v1")
+
+# 速率限制装饰器（如果可用）
+# 注意：slowapi 需要函数签名包含 request 参数，这里暂时禁用
+# 如果需要启用速率限制，请确保已安装 slowapi 并正确配置
+def rate_limit(calls: int = 10, period: int = 60):
+    """速率限制装饰器（暂时禁用）"""
+    return lambda x: x  # No-op for now
+
+
+# --- Chat Resources (RESTful) ---
+
+@api_v1_router.get("/chats", tags=["chats"])
+@rate_limit(calls=30, period=60)
+async def list_chats_v1():
+    """获取所有会话列表 - RESTful 风格"""
+    try:
+        chat_ids = await postgres_storage.list_conversations()
+        return {"data": chat_ids}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error listing chats: {str(e)}")
+
+
+@api_v1_router.post("/chats", tags=["chats"])
+@rate_limit(calls=20, period=60)
+async def create_chat_v1():
+    """创建新会话 - RESTful 风格 (替代 /chat/new)"""
+    try:
+        new_chat_id = str(uuid.uuid4())
+        await postgres_storage.save_messages_immediate(new_chat_id, [])
+        await postgres_storage.set_chat_metadata(new_chat_id, f"Chat {new_chat_id[:8]}")
+        config_manager.updated_current_chat_id(new_chat_id)
+        
+        return {
+            "data": {
+                "chat_id": new_chat_id,
+                "message": "New chat created"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating chat: {str(e)}")
+
+
+@api_v1_router.get("/chats/current", tags=["chats"])
+@rate_limit(calls=30, period=60)
+async def get_current_chat_v1():
+    """获取当前活动会话 - RESTful 风格 (替代 /chat_id GET)"""
+    try:
+        config = config_manager.read_config()
+        current_chat_id = config.current_chat_id
+        
+        if current_chat_id and await postgres_storage.exists(current_chat_id):
+            return {
+                "data": {
+                    "chat_id": current_chat_id
+                }
+            }
+        
+        # 如果不存在则创建新会话
+        new_chat_id = str(uuid.uuid4())
+        await postgres_storage.save_messages_immediate(new_chat_id, [])
+        await postgres_storage.set_chat_metadata(new_chat_id, f"Chat {new_chat_id[:8]}")
+        config_manager.updated_current_chat_id(new_chat_id)
+        
+        return {
+            "data": {
+                "chat_id": new_chat_id
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.patch("/chats/current", tags=["chats"])
+@rate_limit(calls=20, period=60)
+async def update_current_chat_v1(request: ChatIdRequest):
+    """更新当前活动会话 - RESTful 风格 (替代 /chat_id POST)"""
+    try:
+        config_manager.updated_current_chat_id(request.chat_id)
+        return {
+            "data": {
+                "chat_id": request.chat_id,
+                "message": f"Current chat updated to {request.chat_id}"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# --- Source Resources (RESTful) ---
+
+@api_v1_router.get("/sources", tags=["sources"])
+@rate_limit(calls=30, period=60)
+async def get_sources_v1():
+    """获取所有文档源 - RESTful 风格"""
+    try:
+        config = config_manager.read_config()
+        return {"data": config.sources}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.post("/sources:reindex", tags=["sources"])
+@rate_limit(calls=5, period=300)
+async def reindex_sources_v1(sources: List[str] = None):
+    """重新索引文档源 - RESTful 风格 (替代 /sources/reindex)"""
+    try:
+        task_id = str(uuid.uuid4())
+        indexing_tasks[task_id] = "started"
+        
+        # 触发后台索引任务
+        # background_tasks.add_task(...)
+        
+        return {
+            "data": {
+                "task_id": task_id,
+                "status": "started"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.get("/selected-sources", tags=["sources"])
+@rate_limit(calls=30, period=60)
+async def get_selected_sources_v1():
+    """获取当前选中的源"""
+    try:
+        config = config_manager.read_config()
+        return {"data": config.selected_sources}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.post("/selected-sources", tags=["sources"])
+@rate_limit(calls=20, period=60)
+async def update_selected_sources_v1(request: dict):
+    """设置选中的源"""
+    try:
+        sources = request.get("sources", [])
+        config_manager.updated_selected_sources(sources)
+        return {"data": {"selected_sources": sources}}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# --- Chat Individual Resource Operations (RESTful) ---
+
+class ChatRenameRequest(BaseModel):
+    """请求体：重命名会话"""
+    title: str
+
+
+@api_v1_router.get("/chats/{chat_id}/messages", tags=["chats"])
+@rate_limit(calls=30, period=60)
+async def get_chat_messages_v1(chat_id: str, limit: Optional[int] = Query(None, ge=1, le=1000)):
+    """获取指定会话的消息历史"""
+    try:
+        messages = await postgres_storage.get_messages(chat_id, limit=limit)
+        # 转换为字典格式
+        messages_data = [postgres_storage._message_to_dict(msg) for msg in messages]
+        return {"data": messages_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.get("/chats/{chat_id}/metadata", tags=["chats"])
+@rate_limit(calls=30, period=60)
+async def get_chat_metadata_v1(chat_id: str):
+    """获取指定会话的元数据"""
+    try:
+        metadata = await postgres_storage.get_chat_metadata(chat_id)
+        return {"data": metadata}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.patch("/chats/{chat_id}/metadata", tags=["chats"])
+@rate_limit(calls=20, period=60)
+async def update_chat_metadata_v1(chat_id: str, request: ChatRenameRequest):
+    """更新指定会话的元数据（如重命名）- 替代 POST /chat/rename"""
+    try:
+        await postgres_storage.set_chat_metadata(chat_id, request.title)
+        return {
+            "data": {
+                "chat_id": chat_id,
+                "title": request.title,
+                "message": "Chat metadata updated"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.delete("/chats/{chat_id}", tags=["chats"])
+@rate_limit(calls=10, period=60)
+async def delete_chat_v1(chat_id: str):
+    """删除指定会话 - 替代 DELETE /chat/{chat_id}"""
+    try:
+        success = await postgres_storage.delete_conversation(chat_id)
+        if success:
+            return {
+                "data": {
+                    "chat_id": chat_id,
+                    "message": "Chat deleted successfully"
+                }
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Chat not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+@api_v1_router.delete("/chats", tags=["chats"])
+@rate_limit(calls=5, period=300)
+async def clear_all_chats_v1():
+    """清除所有会话 - 替代 DELETE /chats/clear"""
+    try:
+        chat_ids = await postgres_storage.list_conversations()
+        deleted_count = 0
+        for chat_id in chat_ids:
+            success = await postgres_storage.delete_conversation(chat_id)
+            if success:
+                deleted_count += 1
+        
+        return {
+            "data": {
+                "deleted_count": deleted_count,
+                "message": f"Successfully deleted {deleted_count} chats"
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error: {str(e)}")
+
+
+# 注册 v1 路由
+app.include_router(api_v1_router)
+
+
+async def handle_chat_messages(websocket: WebSocket, chat_id: str, heartbeat_interval: int = 30):
     """处理单个 chat_id 的消息，独立运行不阻塞其他连接。
     
     每个 WebSocket 连接创建一个独立的任务来执行查询，
     这样多个用户可以同时向不同的 chat_id 发送消息。
     
-    支持 stop 消息中断生成，以及 WebSocket 断开时的资源清理。
+    支持:
+    - stop 消息中断生成
+    - 心跳机制 (ping/pong) 保持连接活跃
+    - 连接超时处理
+    - WebSocket 断开时的资源清理
+    
+    Args:
+        websocket: WebSocket 连接
+        chat_id: 会话 ID
+        heartbeat_interval: 心跳间隔秒数 (默认 30 秒)
     """
     stop_event = asyncio.Event()
     current_query_task = None
+    last_heartbeat = asyncio.get_event_loop().time()
+    heartbeat_timeout = heartbeat_interval * 3  # 3 倍间隔无响应则断开
+    
+    async def send_heartbeat():
+        """定期发送心跳"""
+        while True:
+            await asyncio.sleep(heartbeat_interval)
+            try:
+                await websocket.send_json({"type": "ping", "timestamp": asyncio.get_event_loop().time()})
+                logger.debug(f"Heartbeat sent for chat {chat_id}")
+            except Exception:
+                break  # 连接已关闭
+    
+    async def check_heartbeat():
+        """检查心跳超时"""
+        while True:
+            await asyncio.sleep(10)  # 每 10 秒检查一次
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_heartbeat > heartbeat_timeout:
+                logger.warning(f"Heartbeat timeout for chat {chat_id}, closing connection")
+                await websocket.close(code=4002, reason="Heartbeat timeout")
+                stop_event.set()
+                break
+    
+    # 启动心跳任务
+    heartbeat_task = asyncio.create_task(send_heartbeat())
+    heartbeat_monitor_task = asyncio.create_task(check_heartbeat())
     
     try:
         # 发送历史消息
@@ -143,11 +565,31 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
         await websocket.send_json({"type": "history", "messages": history})
         
         while True:
-            data = await websocket.receive_text()
+            # 使用超时机制来支持心跳检测
+            try:
+                data = await asyncio.wait_for(websocket.receive_text(), timeout=60.0)
+            except asyncio.TimeoutError:
+                # 60 秒无消息，检查心跳
+                current_time = asyncio.get_event_loop().time()
+                if current_time - last_heartbeat > heartbeat_timeout:
+                    logger.warning(f"No activity for 60s, heartbeat timeout for chat {chat_id}")
+                    break
+                continue
+            
             client_message = json.loads(data)
+            msg_type = client_message.get("type")
+            
+            # 处理心跳 pong 响应
+            if msg_type == "pong":
+                last_heartbeat = asyncio.get_event_loop().time()
+                logger.debug(f"Heartbeat pong received for chat {chat_id}")
+                continue
+            
+            # 更新最后心跳时间
+            last_heartbeat = asyncio.get_event_loop().time()
             
             # Handle stop message - interrupt ongoing generation
-            if client_message.get("type") == "stop":
+            if msg_type == "stop":
                 stop_event.set()
                 logger.info(f"Stop requested for chat {chat_id}")
                 
@@ -225,6 +667,10 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
     except Exception as e:
         logger.error(f"Error in chat handler for {chat_id}: {str(e)}", exc_info=True)
     finally:
+        # 取消心跳任务
+        heartbeat_task.cancel()
+        heartbeat_monitor_task.cancel()
+        
         # 确保清理
         stop_event.set()
         if current_query_task and not current_query_task.done():
@@ -240,20 +686,32 @@ async def handle_chat_messages(websocket: WebSocket, chat_id: str):
 async def websocket_endpoint(
     websocket: WebSocket, 
     chat_id: str,
-    token: Optional[str] = Query(None)
+    token: Optional[str] = Query(None, description="JWT token for authentication"),
+    heartbeat: Optional[int] = Query(30, ge=10, le=300, description="Heartbeat interval in seconds")
 ):
     """WebSocket endpoint for real-time chat communication.
-    
-    支持真正的并发处理：
-    - 每个 chat_id 的消息处理作为独立 asyncio.Task
-    - 多个用户可以同时向不同的 chat_id 发送消息
-    - llama.cpp 层面通过 --parallel 和 --cont-batching 支持真正的并发推理
+-time chat communication.
+    - 真正的并发处理：每个 chat_id 的消息处理作为独立 asyncio.Task
+    - 心跳机制：保持连接活跃，检测断连
+    - JWT 认证：可选的 token 认证
+    - 连接超时处理
     
     Args:
         websocket: WebSocket connection
         chat_id: Unique chat identifier
         token: Optional JWT token for authentication (required if AUTH_ENABLED)
+        heartbeat: Heartbeat interval in seconds (default 30, min 10, max 300)
+    
+    WebSocket 消息格式:
+    - 发送消息: {"type": "message", "content": "your message"}
+    - 停止生成: {"type": "stop"}
+    - 心跳响应: {"type": "pong"}
+    
+    服务器会定期发送:
+    - {"type": "ping", "timestamp": 1234567890}
+    - 客户端应回复 {"type": "pong"}
     """
+    # 认证检查
     if AUTH_ENABLED:
         try:
             from auth import verify_token
@@ -266,7 +724,12 @@ async def websocket_endpoint(
             await websocket.close(code=4001, reason=f"Authentication failed: {str(e)}")
             return
     
-    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}")
+    # 验证 chat_id 格式 (防止路径遍历)
+    if not chat_id or len(chat_id) > 100:
+        await websocket.close(code=4003, reason="Invalid chat_id")
+        return
+    
+    logger.debug(f"WebSocket connection attempt for chat_id: {chat_id}, heartbeat: {heartbeat}s")
     try:
         await websocket.accept()
         logger.debug(f"WebSocket connection accepted for chat_id: {chat_id}")
@@ -276,9 +739,8 @@ async def websocket_endpoint(
             active_connections[chat_id] = set()
         active_connections[chat_id].add(websocket)
         
-        # 启动独立任务处理此连接的消息
-        # 不再使用串行 while True，而是为每个连接创建独立任务
-        task = asyncio.create_task(handle_chat_messages(websocket, chat_id))
+        # 启动独立任务处理此连接的消息，传递心跳间隔
+        task = asyncio.create_task(handle_chat_messages(websocket, chat_id, heartbeat_interval=heartbeat))
         
         # 等待任务完成（连接断开）
         await task

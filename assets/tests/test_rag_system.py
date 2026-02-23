@@ -60,6 +60,7 @@ MIRAGE_BENCHMARKS = {
     "ndcg@10": 0.55,          # MIRAGE 标准: 0.55
     "context_relevance": 0.7, # 上下文相关性标准
     "answer_quality": 0.6,    # 回答质量标准
+    "grounding_score": 0.5,   # 事实依据标准
 }
 
 # RAGBench 域特定测试查询
@@ -340,7 +341,7 @@ class TestRAGRetrievalMetrics:
     def _record_result(self, name: str, passed: bool, level: TestLevel,
                       duration: float, message: str = "", 
                       details: Dict = None, benchmark: Dict = None):
-        cls.results.append(TestResult(
+        TestRAGRetrievalMetrics.results.append(TestResult(
             name=name,
             passed=passed,
             level=level,
@@ -524,7 +525,7 @@ class TestRAGAnswerQuality:
     def _record_result(self, name: str, passed: bool, level: TestLevel,
                       duration: float, message: str = "", 
                       details: Dict = None, benchmark: Dict = None):
-        cls.results.append(TestResult(
+        TestRAGRetrievalMetrics.results.append(TestResult(
             name=name,
             passed=passed,
             level=level,
@@ -619,7 +620,7 @@ class TestRAGPerformance:
     def _record_result(self, name: str, passed: bool, level: TestLevel,
                       duration: float, message: str = "", 
                       details: Dict = None):
-        cls.results.append(TestResult(
+        TestRAGPerformance.results.append(TestResult(
             name=name,
             passed=passed,
             level=level,
