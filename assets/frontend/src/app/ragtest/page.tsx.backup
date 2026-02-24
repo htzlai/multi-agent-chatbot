@@ -1,0 +1,1200 @@
+/*
+# SPDX-FileCopyrightText: Copyright (c) 1993-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+*/
+"use client";
+
+import { useState, useEffect, useCallback, useRef } from 'react';
+import Link from 'next/link';
+import styles from '@/styles/Ragtest.module.css';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+
+// ============== Configuration ==============
+const API_BASE_URL = 'http://localhost:8000';
+
+// ============== Types ==============
+interface Chat {
+  chat_id: string;
+  name?: string;
+  message_count?: number;
+  created_at?: string;
+}
+
+interface ChatMessage {
+  type: string;
+  content: string;
+}
+
+interface Source {
+  name: string;
+  selected: boolean;
+}
+
+interface SourceResult {
+  name: string;
+  chunk_count: number;
+  max_score: number;
+  avg_score: number;
+  chunks: { excerpt: string; score: number; text_length: number }[];
+}
+
+interface RagResponse {
+  answer: string;
+  sources: SourceResult[];
+  retrieval_metadata?: {
+    total_chunks_retrieved: number;
+    unique_sources_count: number;
+    score_range: { min: number; max: number; avg: number };
+  };
+}
+
+interface Model {
+  id: string;
+  object: string;
+  created: number;
+  owned_by: string;
+}
+
+interface VectorStats {
+  collection: string;
+  total_entities: number;
+  fields: any[];
+  index_count?: number;
+}
+
+// ============== Utility Functions ==============
+const formatDate = (dateString?: string) => {
+  if (!dateString) return 'N/A';
+  return new Date(dateString).toLocaleString();
+};
+
+const truncate = (str: string, length: number) => {
+  if (str.length <= length) return str;
+  return str.substring(0, length) + '...';
+};
+
+const getScoreColor = (score: number) => {
+  if (score >= 0.8) return '#10b981';
+  if (score >= 0.5) return '#f59e0b';
+  return '#64748b';
+};
+
+const getScoreLabel = (score: number) => {
+  if (score >= 0.8) return 'High';
+  if (score >= 0.5) return 'Medium';
+  return 'Low';
+};
+
+// ============== Icons ==============
+const Icons = {
+  Chat: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    </svg>
+  ),
+  File: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+      <path d="M14 2v6h6M16 13H8M16 17H8M10 9H8"/>
+    </svg>
+  ),
+  Search: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="11" cy="11" r="8"/>
+      <path d="M21 21l-4.35-4.35"/>
+    </svg>
+  ),
+  Cpu: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="4" y="4" width="16" height="16" rx="2" ry="2"/>
+      <rect x="9" y="9" width="6" height="6"/>
+      <path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>
+    </svg>
+  ),
+  Plus: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 5v14M5 12h14"/>
+    </svg>
+  ),
+  Trash: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+    </svg>
+  ),
+  Refresh: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M23 4v6h-6M1 20v-6h6"/>
+      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+    </svg>
+  ),
+  ArrowLeft: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M19 12H5M12 19l-7-7 7-7"/>
+    </svg>
+  ),
+  Send: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/>
+    </svg>
+  ),
+  X: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6L6 18M6 6l12 12"/>
+    </svg>
+  ),
+  Check: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 6L9 17l-5-5"/>
+    </svg>
+  ),
+  ChevronRight: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18l6-6-6-6"/>
+    </svg>
+  ),
+  Menu: () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 12h18M3 6h18M3 18h18"/>
+    </svg>
+  ),
+  Database: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <ellipse cx="12" cy="5" rx="9" ry="3"/>
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/>
+      <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/>
+    </svg>
+  ),
+  Settings: () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  ),
+  Eye: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
+  ),
+  Edit: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/>
+      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/>
+    </svg>
+  ),
+};
+
+// ============== Main Component ==============
+export default function RagtestPage() {
+  // UI State
+  const [activeView, setActiveView] = useState<'chat' | 'sources' | 'search' | 'models'>('chat');
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  // Chat State
+  const [chats, setChats] = useState<Chat[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [currentChatMessages, setCurrentChatMessages] = useState<ChatMessage[]>([]);
+  const [selectedChatMessages, setSelectedChatMessages] = useState<ChatMessage[]>([]);
+  
+  // Chat Input State
+  const [chatInput, setChatInput] = useState('');
+  const [isStreaming, setIsStreaming] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Sources State
+  const [sources, setSources] = useState<Source[]>([]);
+  const [selectedSources, setSelectedSources] = useState<string[]>([]);
+  const [isReindexing, setIsReindexing] = useState(false);
+
+  // RAG Search State
+  const [query, setQuery] = useState('');
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchResults, setSearchResults] = useState<RagResponse | null>(null);
+
+  // Models State
+  const [models, setModels] = useState<Model[]>([]);
+
+  // Stats State
+  const [vectorStats, setVectorStats] = useState<VectorStats | null>(null);
+
+  // Modal State
+  const [viewingChatId, setViewingChatId] = useState<string | null>(null);
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [newChatName, setNewChatName] = useState('');
+
+  // Show toast notification
+  const showToast = useCallback((message: string, type: 'success' | 'error') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  // ============== API Functions ==============
+  const fetchChats = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`);
+      if (res.ok) {
+        const data = await res.json();
+        const chatList = (data.data || []).map((id: string) => ({ chat_id: id, name: id }));
+        setChats(chatList);
+      }
+    } catch (err) {
+      console.error('Error fetching chats:', err);
+    }
+  }, []);
+
+  const fetchChatMessages = useCallback(async (chatId: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/messages`);
+      if (res.ok) {
+        const data = await res.json();
+        const messages = (data.data || []).map((msg: any) => ({
+          type: msg.type,
+          content: msg.content
+        }));
+        if (chatId === currentChatId) {
+          setCurrentChatMessages(messages);
+        } else {
+          setSelectedChatMessages(messages);
+        }
+      }
+    } catch (err) {
+      console.error('Error fetching chat messages:', err);
+    }
+  }, [currentChatId]);
+
+  const createNewChat = async () => {
+    try {
+      setError(null);
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        showToast('New chat created', 'success');
+        await fetchChats();
+        setCurrentChatId(data.data?.chat_id || null);
+      } else {
+        throw new Error('Failed to create chat');
+      }
+    } catch (err) {
+      showToast('Failed to create new chat', 'error');
+    }
+  };
+
+  const switchCurrentChat = async (chatId: string) => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/current`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId })
+      });
+      if (res.ok) {
+        setCurrentChatId(chatId);
+        fetchChatMessages(chatId);
+      }
+    } catch (err) {
+      console.error('Error switching chat:', err);
+    }
+  };
+
+  const deleteChat = async (chatId: string) => {
+    if (!confirm(`Delete chat "${truncate(chatId, 20)}"?`)) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}`, { method: 'DELETE' });
+      if (res.ok) {
+        showToast('Chat deleted', 'success');
+        if (currentChatId === chatId) {
+          setCurrentChatId(null);
+          setCurrentChatMessages([]);
+        }
+        await fetchChats();
+      }
+    } catch (err) {
+      showToast('Failed to delete chat', 'error');
+    }
+  };
+
+  const clearAllChats = async () => {
+    if (!confirm('Delete ALL chats? This cannot be undone.')) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats`, { method: 'DELETE' });
+      if (res.ok) {
+        showToast('All chats cleared', 'success');
+        setChats([]);
+        setCurrentChatId(null);
+        setCurrentChatMessages([]);
+      }
+    } catch (err) {
+      showToast('Failed to clear chats', 'error');
+    }
+  };
+
+  const renameChat = async (chatId: string) => {
+    if (!newChatName.trim()) return;
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/metadata`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: newChatName })
+      });
+      if (res.ok) {
+        setRenamingChatId(null);
+        setNewChatName('');
+        await fetchChats();
+        showToast('Chat renamed', 'success');
+      }
+    } catch (err) {
+      showToast('Failed to rename chat', 'error');
+    }
+  };
+
+  // Source APIs
+  const fetchSources = useCallback(async () => {
+    try {
+      const [allRes, selectedRes] = await Promise.all([
+        fetch(`${API_BASE_URL}/api/v1/sources`),
+        fetch(`${API_BASE_URL}/api/v1/selected-sources`)
+      ]);
+      const allSources = (await allRes.json()).data || [];
+      const selected = (await selectedRes.json()).data || [];
+      setSources(allSources.map((name: string) => ({ name, selected: selected.includes(name) })));
+      setSelectedSources(selected);
+    } catch (err) {
+      console.error('Error fetching sources:', err);
+    }
+  }, []);
+
+  const toggleSource = async (sourceName: string) => {
+    const newSelected = selectedSources.includes(sourceName)
+      ? selectedSources.filter(s => s !== sourceName)
+      : [...selectedSources, sourceName];
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: newSelected })
+      });
+      if (res.ok) {
+        setSelectedSources(newSelected);
+        setSources(sources.map(s => ({ ...s, selected: newSelected.includes(s.name) })));
+      }
+    } catch (err) {
+      showToast('Failed to update source selection', 'error');
+    }
+  };
+
+  const selectAllSources = async () => {
+    const allSourceNames = sources.map(s => s.name);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: allSourceNames })
+      });
+      if (res.ok) {
+        setSelectedSources(allSourceNames);
+        setSources(sources.map(s => ({ ...s, selected: true })));
+      }
+    } catch (err) {
+      showToast('Failed to select all sources', 'error');
+    }
+  };
+
+  const deselectAllSources = async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/selected-sources`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: [] })
+      });
+      if (res.ok) {
+        setSelectedSources([]);
+        setSources(sources.map(s => ({ ...s, selected: false })));
+      }
+    } catch (err) {
+      showToast('Failed to deselect sources', 'error');
+    }
+  };
+
+  const reindexSources = async () => {
+    if (selectedSources.length === 0) {
+      showToast('Please select at least one source to reindex', 'error');
+      return;
+    }
+    setIsReindexing(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/v1/sources:reindex`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sources: selectedSources })
+      });
+      if (res.ok) {
+        showToast('Reindexing started', 'success');
+      }
+    } catch (err) {
+      showToast('Failed to start reindexing', 'error');
+    } finally {
+      setIsReindexing(false);
+    }
+  };
+
+  // RAG Search
+  const performRagSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!query.trim() || isSearching) return;
+    setIsSearching(true);
+    setError(null);
+    setSearchResults(null);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/test/rag?query=${encodeURIComponent(query)}&k=8`);
+      if (!res.ok) throw new Error('Search failed');
+      setSearchResults(await res.json());
+    } catch (err) {
+      showToast('RAG search failed', 'error');
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
+  // Models API
+  const fetchModels = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/v1/models`);
+      if (res.ok) {
+        const data = await res.json();
+        setModels(data.data || []);
+      }
+    } catch (err) {
+      console.error('Error fetching models:', err);
+    }
+  }, []);
+
+  const fetchVectorStats = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/test/vector-stats`);
+      if (res.ok) setVectorStats(await res.json());
+    } catch (err) {
+      console.error('Error fetching vector stats:', err);
+    }
+  }, []);
+
+  // ============== Effects ==============
+  useEffect(() => {
+    const loadData = async () => {
+      setIsLoading(true);
+      try {
+        await Promise.all([
+          fetchChats(),
+          fetchSources(),
+          fetchModels(),
+          fetchVectorStats()
+        ]);
+        // Fetch current chat after other data
+        const currentRes = await fetch(`${API_BASE_URL}/api/v1/chats/current`);
+        if (currentRes.ok) {
+          const data = await currentRes.json();
+          const chatId = data.data?.chat_id || null;
+          setCurrentChatId(chatId);
+          if (chatId) {
+            const msgRes = await fetch(`${API_BASE_URL}/api/v1/chats/${chatId}/messages`);
+            if (msgRes.ok) {
+              const msgData = await msgRes.json();
+              const messages = (msgData.data || []).map((msg: any) => ({
+                type: msg.type,
+                content: msg.content
+              }));
+              setCurrentChatMessages(messages);
+            }
+          }
+        }
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    loadData();
+  }, []);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [currentChatMessages]);
+
+  // WebSocket for real-time chat
+  useEffect(() => {
+    if (!currentChatId) return;
+
+    const wsProtocol = 'ws:';
+    const ws = new WebSocket(`${wsProtocol}//${API_BASE_URL.replace('http://', '')}/ws/chat/${currentChatId}?heartbeat=30`);
+    wsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      const type = msg.type;
+      const text = msg.data ?? msg.token ?? '';
+
+      switch (type) {
+        case 'history':
+          if (Array.isArray(msg.messages)) {
+            const msgs = msg.messages.map((m: any) => ({ type: m.type, content: m.content }));
+            setCurrentChatMessages(msgs);
+          }
+          setIsStreaming(false);
+          break;
+        case 'token':
+          if (text) {
+            setCurrentChatMessages(prev => {
+              const msgs = [...prev];
+              const last = msgs[msgs.length - 1];
+              if (last && last.type === 'AIMessage') {
+                last.content += text;
+              } else {
+                msgs.push({ type: 'AIMessage', content: text });
+              }
+              return msgs;
+            });
+          }
+          break;
+        case 'node_start':
+          if (msg?.data === 'generate') {
+            setIsStreaming(true);
+          }
+          break;
+        case 'node_end':
+        case 'stopped':
+          setIsStreaming(false);
+          break;
+        case 'error':
+          showToast(msg.message || 'An error occurred', 'error');
+          setIsStreaming(false);
+          break;
+      }
+    };
+
+    ws.onerror = () => {
+      showToast('WebSocket connection error', 'error');
+      setIsStreaming(false);
+    };
+
+    ws.onclose = () => {
+      setIsStreaming(false);
+    };
+
+    return () => {
+      ws.close();
+    };
+  }, [currentChatId, showToast]);
+
+  const handleSendMessage = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!chatInput.trim() || isStreaming || !wsRef.current) return;
+    wsRef.current.send(JSON.stringify({ message: chatInput }));
+    setCurrentChatMessages(prev => [...prev, { type: 'HumanMessage', content: chatInput }]);
+    setChatInput('');
+  };
+
+  // ============== Render Helpers ==============
+  const selectedSourcesList = sources.filter(s => s.selected);
+  const unselectedSourcesList = sources.filter(s => !s.selected);
+
+  // Render loading state
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-12 w-12 animate-spin rounded-full border-4 border-green-500 border-t-transparent"></div>
+          <p className="text-muted-foreground">Loading RAG System...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col h-screen bg-background text-foreground">
+      {/* Toast Notification */}
+      {toast && (
+        <div className={`fixed top-20 right-4 z-50 px-4 py-3 rounded-lg shadow-lg ${
+          toast.type === 'success' 
+            ? 'bg-green-600 text-white' 
+            : 'bg-red-600 text-white'
+        }`}>
+          {toast.message}
+        </div>
+      )}
+
+      {/* Header */}
+      <header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-border/50 bg-background/95 px-6 backdrop-blur-sm">
+        <div className="flex items-center gap-4">
+          <button 
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted hover:bg-muted/80 transition-colors"
+            onClick={() => setSidebarOpen(!sidebarOpen)}
+            aria-label="Toggle sidebar"
+          >
+            <Icons.Menu />
+          </button>
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 shadow-md">
+              <svg 
+                xmlns="http://www.w3.org/2000/svg" 
+                width="16" 
+                height="16" 
+                viewBox="0 0 24 24" 
+                fill="none" 
+                stroke="white" 
+                strokeWidth="2.5" 
+                strokeLinecap="round" 
+                strokeLinejoin="round"
+              >
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" />
+              </svg>
+            </div>
+            <span className="font-bold text-lg tracking-tight">RAG Console</span>
+          </div>
+        </div>
+        
+        <div className="flex items-center gap-2">
+          <Link href="/" className="flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted-foreground hover:bg-muted hover:text-foreground transition-colors">
+            <Icons.ArrowLeft />
+            <span>Back</span>
+          </Link>
+          <button 
+            className="flex h-9 w-9 items-center justify-center rounded-lg bg-muted hover:bg-muted/80 transition-colors"
+            onClick={() => window.location.reload()}
+            aria-label="Refresh"
+          >
+            <Icons.Refresh />
+          </button>
+        </div>
+      </header>
+
+      <div className="flex h-[calc(100vh-4rem)]">
+        {/* Sidebar */}
+        <aside className={`flex flex-col border-r border-border/50 bg-card/30 transition-all duration-300 ${sidebarOpen ? 'w-72' : 'w-0 overflow-hidden'}`}>
+          {/* Stats Card */}
+          <div className="border-b border-border/50 p-4">
+            <div className="flex items-center gap-2 mb-4">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-green-500/10">
+                <Icons.Database />
+              </div>
+              <span className="font-semibold">System Status</span>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div className="rounded-lg bg-muted/50 p-3">
+                <div className="text-2xl font-bold text-green-600">{vectorStats?.total_entities?.toLocaleString() || '0'}</div>
+                <div className="text-xs text-muted-foreground">Vectors</div>
+              </div>
+              <div className="rounded-lg bg-muted/50 p-3">
+                <div className="text-2xl font-bold">{sources.length}</div>
+                <div className="text-xs text-muted-foreground">Sources</div>
+              </div>
+              <div className="rounded-lg bg-muted/50 p-3">
+                <div className={`text-2xl font-bold ${selectedSources.length > 0 ? 'text-green-600' : ''}`}>{selectedSources.length}</div>
+                <div className="text-xs text-muted-foreground">Active</div>
+              </div>
+              <div className="rounded-lg bg-muted/50 p-3">
+                <div className="text-2xl font-bold">{chats.length}</div>
+                <div className="text-xs text-muted-foreground">Sessions</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Navigation */}
+          <nav className="flex-1 space-y-1 p-3">
+            <button 
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${activeView === 'chat' ? 'bg-green-500/10 text-green-600' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              onClick={() => setActiveView('chat')}
+            >
+              <Icons.Chat />
+              <span className="flex-1 text-left">Chat Sessions</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{chats.length}</span>
+            </button>
+            <button 
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${activeView === 'sources' ? 'bg-green-500/10 text-green-600' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              onClick={() => setActiveView('sources')}
+            >
+              <Icons.File />
+              <span className="flex-1 text-left">Knowledge Sources</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{sources.length}</span>
+            </button>
+            <button 
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${activeView === 'search' ? 'bg-green-500/10 text-green-600' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              onClick={() => setActiveView('search')}
+            >
+              <Icons.Search />
+              <span className="flex-1 text-left">RAG Search</span>
+            </button>
+            <button 
+              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${activeView === 'models' ? 'bg-green-500/10 text-green-600' : 'text-muted-foreground hover:bg-muted hover:text-foreground'}`}
+              onClick={() => setActiveView('models')}
+            >
+              <Icons.Cpu />
+              <span className="flex-1 text-left">Models</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs">{models.length}</span>
+            </button>
+          </nav>
+
+          {/* Quick Actions */}
+          <div className="border-t border-border/50 p-3 space-y-2">
+            <button className="flex w-full items-center justify-center gap-2 rounded-lg bg-green-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-green-700 transition-colors" onClick={createNewChat}>
+              <Icons.Plus />
+              New Session
+            </button>
+            <div className="flex gap-2">
+              <button className="flex-1 rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors" onClick={selectAllSources}>
+                Select All
+              </button>
+              <button className="flex-1 rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-muted transition-colors" onClick={deselectAllSources}>
+                Deselect All
+              </button>
+            </div>
+          </div>
+        </aside>
+
+        {/* Main Content */}
+        <main className="flex-1 overflow-hidden bg-background">
+          
+          {/* Chat Sessions View */}
+          {activeView === 'chat' && (
+            <div className="flex h-full">
+              {/* Sessions List */}
+              <div className="w-80 border-r border-border/50 flex flex-col">
+                <div className="flex items-center justify-between border-b border-border/50 p-4">
+                  <h2 className="font-semibold">Conversations</h2>
+                  <button className="text-sm text-muted-foreground hover:text-foreground" onClick={clearAllChats}>
+                    Clear All
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-3">
+                  {chats.length > 0 ? (
+                    <div className="space-y-2">
+                    chats.map(chat => (
+                      <div 
+                        key={chat.chat_id} 
+                        className={`group flex items-center gap-3 rounded-lg p-3 transition-colors cursor-pointer ${currentChatId === chat.chat_id ? 'bg-green-500/10 border border-green-500/30' : 'hover:bg-muted'}`}
+                      >
+                        {renamingChatId === chat.chat_id ? (
+                          <div className="flex flex-1 items-center gap-2">
+                            <input
+                              type="text"
+                              value={newChatName}
+                              onChange={(e) => setNewChatName(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') renameChat(chat.chat_id);
+                                if (e.key === 'Escape') { setRenamingChatId(null); setNewChatName(''); }
+                              }}
+                              autoFocus
+                              className="flex-1 rounded border border-border bg-background px-2 py-1 text-sm"
+                            />
+                            <button onClick={() => renameChat(chat.chat_id)} className="text-green-600">
+                              <Icons.Check />
+                            </button>
+                            <button onClick={() => { setRenamingChatId(null); setNewChatName(''); }} className="text-muted-foreground">
+                              <Icons.X />
+                            </button>
+                          </div>
+                        ) : (
+                          <>
+                            <div className="flex h-10 w-10 items-center justify-center rounded-full bg-muted">
+                              <span className="text-lg">💬</span>
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="font-medium truncate">{truncate(chat.chat_id, 28)}</div>
+                              <div className="text-xs text-muted-foreground">{chat.message_count || 0} messages</div>
+                            </div>
+                            <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button onClick={() => { setRenamingChatId(chat.chat_id); setNewChatName(chat.chat_id); }} className="p-1.5 hover:bg-muted rounded" title="Rename">
+                                <Icons.Edit />
+                              </button>
+                              <button onClick={() => { setViewingChatId(chat.chat_id); fetchChatMessages(chat.chat_id); }} className="p-1.5 hover:bg-muted rounded" title="View">
+                                <Icons.Eye />
+                              </button>
+                              <button onClick={() => deleteChat(chat.chat_id)} className="p-1.5 hover:bg-muted rounded text-destructive" title="Delete">
+                                <Icons.Trash />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col items-center justify-center py-12 text-center">
+                      <span className="mb-4 text-4xl">💬</span>
+                      <p className="text-muted-foreground mb-4">No conversations yet</p>
+                      <button className="rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700" onClick={createNewChat}>
+                        Start a new chat
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+                                <span className={styles.listItemMeta}>{chat.message_count || 0} messages</span>
+                              </div>
+                            </div>
+                            <div className={styles.listItemActions}>
+                              <button onClick={() => { setRenamingChatId(chat.chat_id); setNewChatName(chat.chat_id); }} title="Rename">
+                                <Icons.Edit />
+                              </button>
+                              <button onClick={() => { setViewingChatId(chat.chat_id); fetchChatMessages(chat.chat_id); }} title="View">
+                                <Icons.Eye />
+                              </button>
+                              <button onClick={() => deleteChat(chat.chat_id)} title="Delete">
+                                <Icons.Trash />
+                              </button>
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptyList}>
+                      <p>No conversations yet</p>
+                      <button className={styles.primaryButton} onClick={createNewChat}>
+                        Start a new chat
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Chat Panel */}
+              <div className={styles.chatPanel}>
+                <div className={styles.chatPanelHeader}>
+                  <h2>{currentChatId ? truncate(currentChatId, 40) : 'Select a conversation'}</h2>
+                  {currentChatId && <span className={styles.liveIndicator}>● Live</span>}
+                </div>
+                <div className={styles.chatMessages}>
+                  {currentChatMessages.map((msg, idx) => (
+                    <div key={idx} className={`${styles.message} ${msg.type === 'HumanMessage' ? styles.messageUser : styles.messageAI}`}>
+                      <div className={styles.messageAvatar}>
+                        {msg.type === 'HumanMessage' ? '👤' : '🤖'}
+                      </div>
+                      <div className={styles.messageContent}>
+                        <div className={styles.messageRole}>{msg.type === 'HumanMessage' ? 'You' : 'Assistant'}</div>
+                        <div className={styles.messageText}>
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                  {isStreaming && (
+                    <div className={`${styles.message} ${styles.messageAI}`}>
+                      <div className={styles.messageAvatar}>🤖</div>
+                      <div className={styles.messageContent}>
+                        <div className={styles.messageRole}>Assistant</div>
+                        <div className={styles.typingDots}>
+                          <span></span><span></span><span></span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} />
+                </div>
+                {currentChatId ? (
+                  <form onSubmit={handleSendMessage} className={styles.chatInput}>
+                    <input
+                      type="text"
+                      value={chatInput}
+                      onChange={(e) => setChatInput(e.target.value)}
+                      placeholder="Type your message..."
+                      disabled={isStreaming}
+                      className={styles.chatInputField}
+                    />
+                    <button type="submit" disabled={!chatInput.trim() || isStreaming} className={styles.sendBtn}>
+                      <Icons.Send />
+                    </button>
+                  </form>
+                ) : (
+                  <div className={styles.chatPlaceholder}>
+                    Select or create a conversation to start chatting
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Knowledge Sources View */}
+          {activeView === 'sources' && (
+            <div className={styles.sourcesView}>
+              <div className={styles.sourceSection}>
+                <div className={styles.sectionHeader}>
+                  <h2>
+                    <span className={styles.countBadge}>{selectedSourcesList.length}</span>
+                    Active Sources
+                  </h2>
+                </div>
+                <div className={styles.sourceGrid}>
+                  {selectedSourcesList.length > 0 ? (
+                    selectedSourcesList.map(source => (
+                      <div key={source.name} className={`${styles.sourceCard} ${styles.sourceCardActive}`}>
+                        <label className={styles.sourceCardLabel}>
+                          <input
+                            type="checkbox"
+                            checked={true}
+                            onChange={() => toggleSource(source.name)}
+                            className={styles.sourceCheckbox}
+                          />
+                          <span className={styles.sourceFileIcon}>📄</span>
+                          <span className={styles.sourceFileName}>{source.name}</span>
+                        </label>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>No active sources</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.sourceSection}>
+                <div className={styles.sectionHeader}>
+                  <h2>
+                    <span className={styles.countBadgeSecondary}>{unselectedSourcesList.length}</span>
+                    Available Sources
+                  </h2>
+                </div>
+                <div className={styles.sourceGrid}>
+                  {unselectedSourcesList.length > 0 ? (
+                    unselectedSourcesList.map(source => (
+                      <div key={source.name} className={styles.sourceCard}>
+                        <label className={styles.sourceCardLabel}>
+                          <input
+                            type="checkbox"
+                            checked={false}
+                            onChange={() => toggleSource(source.name)}
+                            className={styles.sourceCheckbox}
+                          />
+                          <span className={styles.sourceFileIcon}>📄</span>
+                          <span className={styles.sourceFileName}>{source.name}</span>
+                        </label>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>All sources selected</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.actionRow}>
+                <button 
+                  onClick={reindexSources} 
+                  disabled={isReindexing || selectedSources.length === 0}
+                  className={styles.primaryButton}
+                >
+                  <Icons.Refresh />
+                  {isReindexing ? 'Reindexing...' : 'Reindex Selected'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* RAG Search View */}
+          {activeView === 'search' && (
+            <div className={styles.searchView}>
+              <div className={styles.searchBox}>
+                <form onSubmit={performRagSearch} className={styles.searchForm}>
+                  <div className={styles.searchInputGroup}>
+                    <Icons.Search />
+                    <input
+                      type="text"
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                      placeholder="Ask a question about your knowledge base..."
+                      className={styles.searchInput}
+                    />
+                    <button type="submit" disabled={isSearching || !query.trim()} className={styles.searchBtn}>
+                      {isSearching ? 'Searching...' : 'Search'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              {searchResults && (
+                <div className={styles.searchResults}>
+                  {/* Answer Section */}
+                  {searchResults.answer && (
+                    <div className={styles.answerSection}>
+                      <div className={styles.sectionTitle}>
+                        <Icons.Chat />
+                        Generated Answer
+                      </div>
+                      <div className={styles.answerText}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {searchResults.answer}
+                        </ReactMarkdown>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Stats */}
+                  {searchResults.retrieval_metadata && (
+                    <div className={styles.retrievalStats}>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{searchResults.retrieval_metadata.total_chunks_retrieved}</span>
+                        <span className={styles.retrievalStatLabel}>Chunks</span>
+                      </div>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{searchResults.retrieval_metadata.unique_sources_count}</span>
+                        <span className={styles.retrievalStatLabel}>Sources</span>
+                      </div>
+                      <div className={styles.retrievalStat}>
+                        <span className={styles.retrievalStatValue}>{(searchResults.retrieval_metadata.score_range.avg * 100).toFixed(0)}%</span>
+                        <span className={styles.retrievalStatLabel}>Avg Relevance</span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Sources */}
+                  {searchResults.sources && searchResults.sources.length > 0 && (
+                    <div className={styles.sourcesSection}>
+                      <div className={styles.sectionTitle}>
+                        <Icons.File />
+                        Source Documents
+                      </div>
+                      <div className={styles.sourceResultList}>
+                        {searchResults.sources.map((src, idx) => (
+                          <div key={idx} className={styles.sourceResultCard}>
+                            <div className={styles.sourceResultHeader}>
+                              <span className={styles.sourceResultIndex}>{idx + 1}</span>
+                              <span className={styles.sourceResultName}>{src.name}</span>
+                              <span 
+                                className={styles.sourceResultScore}
+                                style={{ backgroundColor: `${getScoreColor(src.max_score)}20`, color: getScoreColor(src.max_score) }}
+                              >
+                                {getScoreLabel(src.max_score)} {(src.max_score * 100).toFixed(0)}%
+                              </span>
+                            </div>
+                            <div className={styles.sourceResultMeta}>{src.chunk_count} chunks</div>
+                            {src.chunks?.[0] && (
+                              <div className={styles.sourceResultExcerpt}>{src.chunks[0].excerpt}</div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!searchResults && !isSearching && (
+                <div className={styles.searchEmpty}>
+                  <Icons.Search />
+                  <h3>Search your knowledge base</h3>
+                  <p>Enter a query above to get AI-powered answers with source citations.</p>
+                  <p className={styles.searchHint}>Active sources: {selectedSources.length > 0 ? selectedSources.join(', ') : 'None selected'}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Models View */}
+          {activeView === 'models' && (
+            <div className={styles.modelsView}>
+              <div className={styles.modelsSection}>
+                <h2 className={styles.sectionTitle}>
+                  <Icons.Cpu />
+                  Available Models
+                </h2>
+                <div className={styles.modelGrid}>
+                  {models.length > 0 ? (
+                    models.map(model => (
+                      <div key={model.id} className={styles.modelCard}>
+                        <div className={styles.modelIcon}>🤖</div>
+                        <div className={styles.modelInfo}>
+                          <span className={styles.modelName}>{model.id}</span>
+                          <span className={styles.modelMeta}>Created: {formatDate(new Date(model.created * 1000).toISOString())}</span>
+                        </div>
+                      </div>
+                    ))
+                  ) : (
+                    <div className={styles.emptySection}>No models available</div>
+                  )}
+                </div>
+              </div>
+
+              <div className={styles.modelsSection}>
+                <h2 className={styles.sectionTitle}>
+                  <Icons.Database />
+                  System Statistics
+                </h2>
+                <div className={styles.statsDashboard}>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{vectorStats?.total_entities?.toLocaleString() || '0'}</span>
+                    <span className={styles.statsCardLabel}>Total Vectors</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{sources.length}</span>
+                    <span className={styles.statsCardLabel}>Total Sources</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={`${styles.statsCardValue} ${selectedSources.length > 0 ? styles.active : ''}`}>
+                      {selectedSources.length}
+                    </span>
+                    <span className={styles.statsCardLabel}>Selected</span>
+                  </div>
+                  <div className={styles.statsCardLarge}>
+                    <span className={styles.statsCardValue}>{chats.length}</span>
+                    <span className={styles.statsCardLabel}>Sessions</span>
+                  </div>
+                </div>
+                {vectorStats && (
+                  <div className={styles.collectionInfo}>
+                    <span className={styles.collectionLabel}>Collection:</span>
+                    <span className={styles.collectionValue}>{vectorStats.collection}</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </main>
+      </div>
+
+      {/* Chat Messages Modal */}
+      {viewingChatId && (
+        <div className={styles.modalOverlay} onClick={() => setViewingChatId(null)}>
+          <div className={styles.modal} onClick={e => e.stopPropagation()}>
+            <div className={styles.modalHeader}>
+              <h3>Chat Messages</h3>
+              <button onClick={() => setViewingChatId(null)} className={styles.modalClose}>
+                <Icons.X />
+              </button>
+            </div>
+            <div className={styles.modalBody}>
+              {selectedChatMessages.length > 0 ? (
+                selectedChatMessages.map((msg, idx) => (
+                  <div key={idx} className={`${styles.message} ${msg.type === 'HumanMessage' ? styles.messageUser : styles.messageAI}`}>
+                    <div className={styles.messageAvatar}>{msg.type === 'HumanMessage' ? '👤' : '🤖'}</div>
+                    <div className={styles.messageContent}>
+                      <div className={styles.messageRole}>{msg.type === 'HumanMessage' ? 'You' : 'Assistant'}</div>
+                      <div className={styles.messageText}>{msg.content}</div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className={styles.emptySection}>No messages</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

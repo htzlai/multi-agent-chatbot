@@ -14,7 +14,10 @@ RAG System Professional Test Runner
     python test_runner.py --compare         # 行业标准对比
     python test_runner.py --quick           # 快速测试
     python test_runner.py --performance    # 性能测试
-    python test_runner.py --full           # 完整测试
+    python test_runner.py --full           # 完整测试 (默认)
+    python test_runner.py --history        # 查看历史记录
+    python test_runner.py --diff           # 对比上次测试
+    python test_runner.py --diff N         # 对比第 N 次测试
 """
 
 import requests
@@ -22,9 +25,10 @@ import json
 import time
 import statistics
 import sys
+import os
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 
 
 # ============================================================
@@ -67,6 +71,166 @@ class BenchmarkComparison:
     actual: float
     standard: float
     status: str  # "pass", "fail", "warning"
+
+
+# ============================================================
+# History & Storage
+# ============================================================
+
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_history.json")
+
+
+def save_test_result(results: Dict[str, Any]):
+    """保存测试结果到历史记录"""
+    # 加载现有历史
+    history = []
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                history = json.load(f)
+        except Exception:
+            history = []
+    
+    # 创建新记录 (移除不可序列化的对象)
+    record = {
+        "timestamp": datetime.now().isoformat(),
+        "results": {
+            "total_entities": results.get("total_entities", 0),
+            "source_count": results.get("source_count", (0, 0)),
+            "benchmark": results.get("benchmark", {}),
+            "performance": results.get("performance", {}),
+            "domain": results.get("domain", {}),
+            "overall_score": results.get("overall_score", 0),
+        }
+    }
+    
+    # 添加到历史 (保留最近 20 条)
+    history.append(record)
+    history = history[-20:]
+    
+    # 保存
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(history, f, ensure_ascii=False, indent=2)
+    
+    print(f"\n  📁 测试结果已保存到: {HISTORY_FILE}")
+
+
+def show_history():
+    """显示历史记录概览"""
+    if not os.path.exists(HISTORY_FILE):
+        print("\n  📭 暂无历史测试记录")
+        return
+    
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    except Exception:
+        print("\n  📭 无法读取历史记录")
+        return
+    
+    if not history:
+        print("\n  📭 暂无历史测试记录")
+        return
+    
+    print("\n" + "═" * 70)
+    print("  历史测试记录")
+    print("═" * 70)
+    
+    print(f"\n  {'#':<3} {'时间':<20} {'综合得分':<10} {'MRR':<8} {'缓存加速':<10}")
+    print("  " + "─" * 70)
+    
+    for i, record in enumerate(reversed(history), 1):
+        timestamp = record.get("timestamp", "")[:19]
+        results = record.get("results", {})
+        score = results.get("overall_score", 0)
+        mrr = results.get("benchmark", {}).get("mrr", {}).get("actual", 0)
+        speedup = results.get("performance", {}).get("speedup", 0)
+        
+        print(f"  {len(history)-i+1:<3} {timestamp:<20} {score:>6.1f}%    {mrr:.3f}   {speedup:.1f}x")
+    
+    print("\n  使用 --diff 查看与上次的对比")
+    print("  使用 --diff N 查看与第 N 次的对比")
+
+
+def show_diff(target: Optional[int] = None):
+    """对比测试结果"""
+    if not os.path.exists(HISTORY_FILE):
+        print("\n  📭 历史记录不足，无法对比")
+        return
+    
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+    except Exception:
+        print("\n  📭 无法读取历史记录")
+        return
+    
+    if len(history) < 2:
+        print("\n  📭 历史记录不足，无法对比")
+        return
+    
+    # 获取当前和上次结果
+    current = history[-1]
+    if target is not None:
+        if target < 1 or target > len(history):
+            print(f"\n  ❌ 无效的记录编号 (1-{len(history)})")
+            return
+        previous = history[-(target + 1)]
+        target_label = f"第 {target} 次测试"
+    else:
+        previous = history[-2]
+        target_label = "上次测试"
+    
+    curr_results = current.get("results", {})
+    prev_results = previous.get("results", {})
+    
+    print("\n" + "═" * 70)
+    print(f"  测试对比: 本次 vs {target_label}")
+    print("═" * 70)
+    print(f"\n  当前: {current.get('timestamp', '')[:19]}")
+    print(f"  对比: {previous.get('timestamp', '')[:19]}")
+    
+    # 对比关键指标
+    print("\n  【关键指标对比】")
+    print(f"\n  {'指标':<20} {'本次':<12} {'上次':<12} {'变化':<10}")
+    print("  " + "─" * 60)
+    
+    # 综合得分
+    curr_score = curr_results.get("overall_score", 0)
+    prev_score = prev_results.get("overall_score", 0)
+    diff = curr_score - prev_score
+    arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+    print(f"  {'综合得分':<18} {curr_score:>6.1f}%     {prev_score:>6.1f}%     {arrow} {abs(diff):.1f}%")
+    
+    # MRR
+    curr_mrr = curr_results.get("benchmark", {}).get("mrr", {}).get("actual", 0)
+    prev_mrr = prev_results.get("benchmark", {}).get("mrr", {}).get("actual", 0)
+    diff = curr_mrr - prev_mrr
+    arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+    print(f"  {'MRR':<18} {curr_mrr:>9.3f}   {prev_mrr:>9.3f}   {arrow} {abs(diff):.3f}")
+    
+    # 缓存加速
+    curr_cache = curr_results.get("performance", {}).get("speedup", 0)
+    prev_cache = prev_results.get("performance", {}).get("speedup", 0)
+    diff = curr_cache - prev_cache
+    arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+    print(f"  {'缓存加速':<18} {curr_cache:>8.1f}x    {prev_cache:>8.1f}x    {arrow} {abs(diff):.1f}x")
+    
+    # P95 延迟
+    curr_lat = curr_results.get("performance", {}).get("p95_latency", 0)
+    prev_lat = prev_results.get("performance", {}).get("p95_latency", 0)
+    diff = curr_lat - prev_lat
+    arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+    print(f"  {'P95 延迟':<18} {curr_lat:>7.0f}ms    {prev_lat:>7.0f}ms    {arrow} {abs(diff):.0f}ms")
+    
+    # 向量数
+    curr_vec = curr_results.get("total_entities", 0)
+    prev_vec = prev_results.get("total_entities", 0)
+    diff = curr_vec - prev_vec
+    arrow = "↑" if diff > 0 else ("↓" if diff < 0 else "=")
+    print(f"  {'向量总数':<18} {curr_vec:>9}    {prev_vec:>9}    {arrow} {abs(diff)}")
+    
+    print("\n" + "═" * 70)
 
 
 # ============================================================
@@ -307,16 +471,16 @@ def test_performance() -> Dict[str, Any]:
     
     query = "缓存性能测试专用查询"
     
-    # 首次查询
+    # 第一次查询 (写入缓存)
     start = time.time()
     requests.post(
         f"{BACKEND_URL}/rag/llamaindex/query",
-        json={"query": query, "use_cache": False},
+        json={"query": query, "use_cache": True},
         timeout=30
     )
     first_time = time.time() - start
     
-    # 缓存查询
+    # 第二次查询 (命中缓存)
     start = time.time()
     requests.post(
         f"{BACKEND_URL}/rag/llamaindex/query",
@@ -495,15 +659,31 @@ def generate_summary(
 
 def main():
     """主函数"""
+    # 解析命令行参数
+    mode = sys.argv[1] if len(sys.argv) > 1 else "full"
+    
+    # 处理历史记录命令
+    if mode == "--history":
+        show_history()
+        return 0
+    
+    if mode == "--diff":
+        target = None
+        if len(sys.argv) > 2:
+            try:
+                target = int(sys.argv[2])
+            except ValueError:
+                print("  ❌ 请输入有效的记录编号")
+                return 1
+        show_diff(target)
+        return 0
+    
+    # 运行测试
     print_header("RAG System Professional Test Runner")
     print("  基于 MIRAGE (ACL 2025) & RAGBench 标准")
     print(f"\n  Backend: {BACKEND_URL}")
     print(f"  时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 解析命令行参数
-    mode = sys.argv[1] if len(sys.argv) > 1 else "full"
-    
-    # 运行测试
     results = {}
     
     # 1. 向量存储测试
@@ -538,14 +718,36 @@ def main():
     
     # 生成摘要
     if mode == "full":
+        # 计算综合得分并准备保存数据
+        benchmark_pass = sum(1 for c in benchmark_results if c.status == "pass")
+        benchmark_score = benchmark_pass / len(benchmark_results) * 100
+        
+        perf_score = 100
+        if performance_results['p95_latency'] > INDUSTRY_STANDARDS["latency_p95"]:
+            perf_score -= 20
+        if performance_results['speedup'] < INDUSTRY_STANDARDS["cache_speedup"]:
+            perf_score -= 20
+        
+        overall_score = (benchmark_score + perf_score) / 2
+        
+        # 转换为可序列化格式
+        results['overall_score'] = overall_score
+        results['benchmark'] = {
+            comp.metric: {"actual": comp.actual, "standard": comp.standard, "status": comp.status}
+            for comp in benchmark_results
+        }
+        
         generate_summary(
             results['total_entities'],
             results['source_count'],
             results['retrieval'],
-            results['benchmark'],
+            benchmark_results,
             results['performance'],
             results['domain']
         )
+        
+        # 保存测试结果
+        save_test_result(results)
     
     return 0
 

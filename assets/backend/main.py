@@ -226,6 +226,17 @@ async def health_check():
     except Exception as e:
         status["services"]["langfuse"] = f"unhealthy: {str(e)[:50]}"
 
+    # 检查 Redis (查询缓存)
+    try:
+        from enhanced_rag import get_redis_query_cache
+        redis_cache = get_redis_query_cache()
+        if redis_cache.is_healthy():
+            status["services"]["redis"] = "healthy"
+        else:
+            status["services"]["redis"] = "degraded: using memory fallback"
+    except Exception as e:
+        status["services"]["redis"] = f"unhealthy: {str(e)[:50]}"
+
     return status
 
 
@@ -245,6 +256,11 @@ async def rag_health_check():
         from enhanced_rag import get_bm25_indexer
         bm25 = get_bm25_indexer()
 
+        # 获取 Redis 缓存状态
+        from enhanced_rag import get_redis_query_cache
+        redis_cache = get_redis_query_cache()
+        cache_stats = redis_cache.get_stats()
+
         return {
             "status": "healthy",
             "rag_index": stats.get("index", {}),
@@ -255,7 +271,13 @@ async def rag_health_check():
                 "fully_synced": knowledge_status["summary"]["fully_synced_count"],
                 "issues": knowledge_status.get("issues", {})
             },
-            "cache": stats.get("cache", {}),
+            "cache": {
+                "backend": cache_stats.get("backend", "memory"),
+                "ttl": cache_stats.get("ttl"),
+                "memory_entries": cache_stats.get("memory_entries", 0),
+                "redis_available": cache_stats.get("redis_available"),
+                "redis_keys": cache_stats.get("redis_keys", "N/A"),
+            },
             "bm25_index": {
                 "initialized": bm25._initialized,
                 "document_count": len(bm25.documents) if bm25._initialized else 0
@@ -1992,7 +2014,10 @@ class LlamaIndexQueryRequest(BaseModel):
     sources: Optional[List[str]] = None
     use_cache: bool = True
     top_k: int = 10
-    use_hybrid: bool = True  # 启用真正的混合搜索 (BM25 + Vector)
+    use_hybrid: bool = True  # 启用混合搜索 (BM25 + Vector)
+    use_reranker: bool = True  # 启用重排序
+    rerank_top_k: int = 5  # 重排序后返回的结果数
+    use_hyde: bool = False  # 启用HyDE查询扩展
 
 
 @app.post("/rag/llamaindex/query")
@@ -2000,10 +2025,22 @@ async def llamaindex_query(request: LlamaIndexQueryRequest):
     """Query using LlamaIndex enhanced RAG.
 
     This endpoint uses LlamaIndex with advanced features:
-    - Hybrid search (BM25 + vector) - now truly implemented!
+    - Hybrid search (BM25 + vector) with RRF fusion
+    - Cross-encoder reranking for improved precision
+    - HyDE query expansion for better recall
     - Multiple chunking strategies
     - Query caching
     - Custom Qwen3 embeddings (2560 dimensions)
+
+    Args:
+        query: The search query
+        sources: Optional list of sources to filter
+        use_cache: Whether to use query cache
+        top_k: Number of results to retrieve before reranking
+        use_hybrid: Whether to use hybrid search
+        use_reranker: Whether to apply cross-encoder reranking
+        rerank_top_k: Number of results to return after reranking
+        use_hyde: Whether to use HyDE query expansion
     """
     try:
         from enhanced_rag import enhanced_rag_query
@@ -2014,10 +2051,13 @@ async def llamaindex_query(request: LlamaIndexQueryRequest):
             use_cache=request.use_cache,
             top_k=request.top_k,
             use_hybrid=request.use_hybrid,
+            use_reranker=request.use_reranker,
+            rerank_top_k=request.rerank_top_k,
+            use_hyde=request.use_hyde,
         )
 
         return result
-        
+
     except Exception as e:
         logger.error(f"Error in LlamaIndex query: {str(e)}", exc_info=True)
         raise HTTPException(
@@ -2042,22 +2082,56 @@ async def llamaindex_stats():
 
 @app.post("/rag/llamaindex/cache/clear")
 async def llamaindex_cache_clear():
-    """Clear the LlamaIndex query cache."""
+    """Clear the LlamaIndex query cache (both Redis and memory)."""
     try:
-        from enhanced_rag import get_query_cache
-        
+        from enhanced_rag import get_query_cache, get_redis_query_cache
+
+        # Clear memory cache
         cache = get_query_cache()
         cache.clear()
-        
+
+        # Clear Redis cache
+        redis_cache = get_redis_query_cache()
+        redis_cache.clear()
+
         return {
             "status": "success",
-            "message": "Query cache cleared successfully"
+            "message": "Query cache cleared (both Redis and memory)"
         }
-        
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"Error clearing cache: {str(e)}"
+        )
+
+
+@app.get("/rag/llamaindex/cache/stats")
+async def llamaindex_cache_stats():
+    """Get query cache statistics (Redis and memory)."""
+    try:
+        from enhanced_rag import get_query_cache, get_redis_query_cache
+
+        # Get memory cache stats
+        memory_cache = get_query_cache()
+
+        # Get Redis cache stats
+        redis_cache = get_redis_query_cache()
+        redis_stats = redis_cache.get_stats()
+
+        return {
+            "status": "success",
+            "memory_cache": {
+                "entries": len(memory_cache.cache),
+                "ttl": memory_cache.ttl
+            },
+            "redis_cache": redis_stats
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error getting cache stats: {str(e)}"
         )
 
 

@@ -202,31 +202,96 @@ class TestResult:
 
 class RAGTestClient:
     """RAG 系统测试客户端"""
-    
+
     def __init__(self, base_url: str = BACKEND_URL):
         self.base_url = base_url
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
         self.session.timeout = TIMEOUT
-    
+
     def get_vector_stats(self) -> Dict[str, Any]:
         """获取向量库统计"""
         response = self.session.get(f"{self.base_url}/test/vector-stats", timeout=10)
         response.raise_for_status()
         return response.json()
-    
+
     def get_all_sources(self) -> List[str]:
-        """获取所有文档源"""
-        response = self.session.get(f"{self.base_url}/sources", timeout=10)
+        """获取所有文档源 (RESTful API v1)"""
+        response = self.session.get(f"{self.base_url}/api/v1/sources", timeout=10)
         response.raise_for_status()
-        return response.json().get("sources", [])
-    
+        return response.json().get("data", [])
+
     def get_selected_sources(self) -> List[str]:
-        """获取当前选中的文档源"""
-        response = self.session.get(f"{self.base_url}/selected_sources", timeout=10)
+        """获取当前选中的文档源 (RESTful API v1)"""
+        response = self.session.get(f"{self.base_url}/api/v1/selected-sources", timeout=10)
         response.raise_for_status()
-        return response.json().get("sources", [])
-    
+        return response.json().get("data", [])
+
+    def set_selected_sources(self, sources: List[str]) -> Dict[str, Any]:
+        """设置选中的文档源 (RESTful API v1)"""
+        response = self.session.post(
+            f"{self.base_url}/api/v1/selected-sources",
+            json={"sources": sources},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def reindex_sources(self, sources: Optional[List[str]] = None) -> Dict[str, Any]:
+        """重新索引文档源 (RESTful API v1)"""
+        payload = {"sources": sources} if sources else {}
+        response = self.session.post(
+            f"{self.base_url}/api/v1/sources:reindex",
+            json=payload,
+            timeout=30
+        )
+        response.raise_for_status()
+        return response.json()
+
+    def create_chat(self) -> str:
+        """创建新会话并返回 chat_id"""
+        response = self.session.post(f"{self.base_url}/api/v1/chats", timeout=10)
+        response.raise_for_status()
+        return response.json().get("data", {}).get("chat_id")
+
+    def get_chat_messages(self, chat_id: str, limit: int = 50) -> List[Dict]:
+        """获取会话消息"""
+        response = self.session.get(
+            f"{self.base_url}/api/v1/chats/{chat_id}/messages",
+            params={"limit": limit},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json().get("data", [])
+
+    def get_chat_metadata(self, chat_id: str) -> Dict[str, Any]:
+        """获取会话元数据"""
+        response = self.session.get(f"{self.base_url}/api/v1/chats/{chat_id}/metadata", timeout=10)
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def update_chat_metadata(self, chat_id: str, title: str) -> Dict[str, Any]:
+        """更新会话元数据"""
+        response = self.session.patch(
+            f"{self.base_url}/api/v1/chats/{chat_id}/metadata",
+            json={"title": title},
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def delete_chat(self, chat_id: str) -> Dict[str, Any]:
+        """删除会话"""
+        response = self.session.delete(f"{self.base_url}/api/v1/chats/{chat_id}", timeout=10)
+        response.raise_for_status()
+        return response.json().get("data", {})
+
+    def clear_all_chats(self) -> Dict[str, Any]:
+        """清除所有会话"""
+        response = self.session.delete(f"{self.base_url}/api/v1/chats", timeout=10)
+        response.raise_for_status()
+        return response.json().get("data", {})
+
     def test_rag(self, query: str, k: int = 8) -> Dict[str, Any]:
         """测试 RAG 检索"""
         response = self.session.get(
@@ -236,15 +301,15 @@ class RAGTestClient:
         )
         response.raise_for_status()
         return response.json()
-    
-    def test_llamaindex_rag(self, query: str, k: int = 10, 
+
+    def test_llamaindex_rag(self, query: str, k: int = 10,
                            sources: Optional[List[str]] = None,
                            use_cache: bool = False) -> Dict[str, Any]:
         """测试 LlamaIndex 增强 RAG"""
         payload = {"query": query, "top_k": k, "use_cache": use_cache}
         if sources:
             payload["sources"] = sources
-        
+
         response = self.session.post(
             f"{self.base_url}/rag/llamaindex/query",
             json=payload,
@@ -328,6 +393,143 @@ class TestRAGSystem:
             self._record_result("test_sources_management", False, TestLevel.CRITICAL,
                               duration, str(e))
             pytest.fail(f"test_sources_management failed: {e}")
+
+
+class TestSessionManagement:
+    """会话管理测试 (RESTful API v1)"""
+
+    @classmethod
+    def setup_class(cls):
+        cls.client = RAGTestClient()
+        cls.results: List[TestResult] = []
+        cls.test_chat_id: Optional[str] = None
+
+    def _record_result(self, name: str, passed: bool, level: TestLevel,
+                      duration: float, message: str = "",
+                      details: Dict = None, benchmark: Dict = None):
+        TestSessionManagement.results.append(TestResult(
+            name=name,
+            passed=passed,
+            level=level,
+            duration=duration,
+            message=message,
+            details=details or {},
+            benchmark_comparison=benchmark or {}
+        ))
+
+    def test_create_chat(self):
+        """测试创建新会话"""
+        start = time.time()
+        try:
+            chat_id = self.client.create_chat()
+            assert chat_id is not None
+            TestSessionManagement.test_chat_id = chat_id
+
+            duration = time.time() - start
+            self._record_result(
+                "test_create_chat", True, TestLevel.CRITICAL, duration,
+                f"创建会话成功: {chat_id[:8]}...",
+                {"chat_id": chat_id}
+            )
+        except Exception as e:
+            duration = time.time() - start
+            self._record_result("test_create_chat", False, TestLevel.CRITICAL,
+                              duration, str(e))
+            pytest.fail(f"test_create_chat failed: {e}")
+
+    def test_get_chat_messages(self):
+        """测试获取会话消息"""
+        if not TestSessionManagement.test_chat_id:
+            pytest.skip("需要先创建会话")
+
+        start = time.time()
+        try:
+            messages = self.client.get_chat_messages(TestSessionManagement.test_chat_id)
+            assert isinstance(messages, list)
+
+            duration = time.time() - start
+            self._record_result(
+                "test_get_chat_messages", True, TestLevel.STANDARD, duration,
+                f"获取消息成功: {len(messages)} 条",
+                {"message_count": len(messages)}
+            )
+        except Exception as e:
+            duration = time.time() - start
+            self._record_result("test_get_chat_messages", False, TestLevel.STANDARD,
+                              duration, str(e))
+            pytest.fail(f"test_get_chat_messages failed: {e}")
+
+    def test_update_chat_metadata(self):
+        """测试更新会话元数据"""
+        if not TestSessionManagement.test_chat_id:
+            pytest.skip("需要先创建会话")
+
+        start = time.time()
+        try:
+            new_title = "测试会话_RAG_2026"
+            result = self.client.update_chat_metadata(
+                TestSessionManagement.test_chat_id,
+                new_title
+            )
+
+            duration = time.time() - start
+            self._record_result(
+                "test_update_chat_metadata", True, TestLevel.STANDARD, duration,
+                f"更新元数据成功: {new_title}",
+                {"title": new_title}
+            )
+        except Exception as e:
+            duration = time.time() - start
+            self._record_result("test_update_chat_metadata", False, TestLevel.STANDARD,
+                              duration, str(e))
+            pytest.fail(f"test_update_chat_metadata failed: {e}")
+
+    def test_delete_chat(self):
+        """测试删除会话"""
+        if not TestSessionManagement.test_chat_id:
+            pytest.skip("需要先创建会话")
+
+        start = time.time()
+        try:
+            result = self.client.delete_chat(TestSessionManagement.test_chat_id)
+
+            duration = time.time() - start
+            self._record_result(
+                "test_delete_chat", True, TestLevel.CRITICAL, duration,
+                f"删除会话成功",
+                {"chat_id": TestSessionManagement.test_chat_id}
+            )
+            TestSessionManagement.test_chat_id = None
+        except Exception as e:
+            duration = time.time() - start
+            self._record_result("test_delete_chat", False, TestLevel.CRITICAL,
+                              duration, str(e))
+            pytest.fail(f"test_delete_chat failed: {e}")
+
+    def test_clear_all_chats(self):
+        """测试清除所有会话"""
+        start = time.time()
+        try:
+            # 先创建一个会话
+            chat_id = self.client.create_chat()
+
+            # 然后清除所有
+            result = self.client.clear_all_chats()
+            deleted_count = result.get("deleted_count", 0)
+
+            duration = time.time() - start
+            passed = deleted_count > 0
+
+            self._record_result(
+                "test_clear_all_chats", passed, TestLevel.CRITICAL, duration,
+                f"清除会话成功: {deleted_count} 个",
+                {"deleted_count": deleted_count}
+            )
+        except Exception as e:
+            duration = time.time() - start
+            self._record_result("test_clear_all_chats", False, TestLevel.CRITICAL,
+                              duration, str(e))
+            pytest.fail(f"test_clear_all_chats failed: {e}")
 
 
 class TestRAGRetrievalMetrics:
@@ -762,13 +964,13 @@ class TestReportGenerator:
 def pytest_sessionfinish(session, exitstatus):
     """生成测试报告"""
     all_results = []
-    
+
     # 收集所有测试结果
-    for test_class in [TestRAGSystem, TestRAGRetrievalMetrics, 
+    for test_class in [TestRAGSystem, TestSessionManagement, TestRAGRetrievalMetrics,
                        TestRAGAnswerQuality, TestRAGPerformance]:
         if hasattr(test_class, 'results'):
             all_results.extend(test_class.results)
-    
+
     if all_results:
         print("\n" + TestReportGenerator.generate_report(all_results))
 
