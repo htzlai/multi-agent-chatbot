@@ -20,9 +20,10 @@
 
 | 接口类型 | 数量 | 状态 |
 |---------|------|------|
-| RESTful API v1 | 11 | ✅ 推荐使用 |
+| RESTful API v1 | 15 | ✅ 推荐使用 |
 | OpenAI 兼容 API | 4 | ✅ 标准兼容 |
 | WebSocket | 1 | ✅ 实时通信 |
+| 健康检查/监控 | 5 | ✅ 新增 |
 | 旧接口 (兼容) | 27 | ⚠️ 维护中 |
 
 ---
@@ -214,6 +215,115 @@ curl -X DELETE http://localhost:8000/api/v1/chats
   "data": {
     "deleted_count": 10,
     "message": "Successfully deleted 10 chats"
+  }
+}
+```
+
+### 1. 健康检查 & 监控 (新增)
+
+> ⚠️ 新增接口 - 用于基础设施监控和调试
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/health` | 全局健康检查 (PostgreSQL/Milvus/Embedding/LLM/Langfuse) |
+| GET | `/health/rag` | RAG 专项健康检查 (索引/缓存/BM25) |
+| GET | `/metrics` | 系统性能指标 |
+| GET | `/debug/config` | 调试: 当前配置 |
+| POST | `/debug/rebuild-bm25` | 调试: 重建 BM25 索引 |
+
+#### 全局健康检查
+
+**GET /health**
+
+```bash
+curl -s http://localhost:8000/health
+```
+
+**响应**:
+```json
+{
+  "status": "healthy",
+  "timestamp": 1700000000.0,
+  "services": {
+    "postgres": "healthy",
+    "milvus": "healthy",
+    "embedding": "healthy",
+    "llm": "healthy",
+    "langfuse": "healthy"
+  }
+}
+```
+
+#### RAG 健康检查
+
+**GET /health/rag**
+
+```bash
+curl -s http://localhost:8000/health/rag
+```
+
+**响应**:
+```json
+{
+  "status": "healthy",
+  "rag_index": {
+    "total_entities": 3933,
+    "embedding_dimensions": 2560
+  },
+  "knowledge": {
+    "config_sources": 33,
+    "file_sources": 33,
+    "vector_sources": 33,
+    "fully_synced": 33
+  },
+  "cache": {
+    "cached_queries": 1,
+    "ttl": 3600
+  },
+  "bm25_index": {
+    "initialized": true,
+    "document_count": 3933
+  }
+}
+```
+
+### 1. RAG 查询 (新增)
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| POST | `/api/v1/rag/query` | RAG 查询 (混合搜索) |
+| GET | `/api/v1/rag/stats` | RAG 统计信息 |
+| GET | `/api/v1/rag/config` | RAG 配置信息 |
+
+#### RAG 查询
+
+**POST /api/v1/rag/query**
+
+```bash
+curl -X POST http://localhost:8000/api/v1/rag/query \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "新加坡EP薪资要求",
+    "top_k": 5,
+    "use_hybrid": true,
+    "use_cache": true
+  }'
+```
+
+**响应**:
+```json
+{
+  "data": {
+    "answer": "根据检索到的文档...",
+    "sources": [
+      {
+        "name": "新加坡就业准证EP与COMPASS完整指南_MOM.md",
+        "score": 0.0323,
+        "excerpt": "..."
+      }
+    ],
+    "num_sources": 3,
+    "search_type": "hybrid"
   }
 }
 ```

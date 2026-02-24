@@ -37,4 +37,8 @@ dependencies = [
     "llama-index-readers-file>=0.3.0",
     # BM25 for hybrid search
     "rank-bm25>=0.2.2",
+    # Langfuse for LLM observability and token tracking
+    # NOTE: Must use v2 (>=2.0.0,<3.0.0) - v3 has incompatible API
+    "langfuse>=2.0.0,<3.0.0",
+    "tiktoken>=0.9.0",
 ]

@@ -146,6 +146,200 @@ app.add_middleware(
 
 from fastapi.exceptions import RequestValidationError
 
+
+# ============================================================
+# Health Check & Monitoring Endpoints - 关键基础设施
+# ============================================================
+
+@app.get("/health", tags=["health"])
+async def health_check():
+    """全局健康检查 - 验证所有基础设施状态"""
+    import time
+    import httpx
+
+    status = {
+        "status": "healthy",
+        "timestamp": time.time(),
+        "services": {}
+    }
+
+    # 检查 PostgreSQL
+    try:
+        await postgres_storage.init_pool()
+        status["services"]["postgres"] = "healthy"
+    except Exception as e:
+        status["services"]["postgres"] = f"unhealthy: {str(e)[:50]}"
+        status["status"] = "degraded"
+
+    # 检查 Milvus
+    try:
+        from pymilvus import connections, Collection, utility
+        connections.connect(uri="http://milvus:19530")
+        if utility.has_collection("context"):
+            collection = Collection("context")
+            collection.load()
+            status["services"]["milvus"] = "healthy"
+        else:
+            status["services"]["milvus"] = "no_collection"
+    except Exception as e:
+        status["services"]["milvus"] = f"unhealthy: {str(e)[:50]}"
+        status["status"] = "degraded"
+
+    # 检查 Embedding 服务
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                "http://qwen3-embedding:8000/v1/embeddings",
+                json={"input": "test", "model": "qwen3-embedding"},
+                timeout=5.0
+            )
+            if resp.status_code == 200:
+                status["services"]["embedding"] = "healthy"
+            else:
+                status["services"]["embedding"] = f"degraded: {resp.status_code}"
+    except Exception as e:
+        status["services"]["embedding"] = f"unhealthy: {str(e)[:50]}"
+        status["status"] = "degraded"
+
+    # 检查 LLM 服务
+    try:
+        async with httpx.AsyncClient() as client:
+            # 尝试连接 LLM 服务
+            resp = await client.post(
+                "http://gpt-oss-120b:8000/v1/models",
+                timeout=5.0
+            )
+            status["services"]["llm"] = "healthy"
+    except Exception as e:
+        status["services"]["llm"] = f"unhealthy: {str(e)[:50]}"
+        status["status"] = "degraded"
+
+    # 检查 Langfuse
+    try:
+        langfuse_host = os.getenv("LANGFUSE_BASE_URL", "http://langfuse:3000")
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(f"{langfuse_host}/api/health", timeout=5.0)
+            if resp.status_code == 200:
+                status["services"]["langfuse"] = "healthy"
+            else:
+                status["services"]["langfuse"] = f"degraded: {resp.status_code}"
+    except Exception as e:
+        status["services"]["langfuse"] = f"unhealthy: {str(e)[:50]}"
+
+    return status
+
+
+@app.get("/health/rag", tags=["health"])
+async def rag_health_check():
+    """RAG 系统专项健康检查"""
+    from enhanced_rag import get_stats, get_query_cache
+
+    try:
+        # 获取 RAG 统计
+        stats = get_stats()
+
+        # 获取知识库状态
+        knowledge_status = await get_knowledge_status()
+
+        # 获取 BM25 索引状态
+        from enhanced_rag import get_bm25_indexer
+        bm25 = get_bm25_indexer()
+
+        return {
+            "status": "healthy",
+            "rag_index": stats.get("index", {}),
+            "knowledge": {
+                "config_sources": knowledge_status["config"]["total"],
+                "file_sources": knowledge_status["files"]["total"],
+                "vector_sources": knowledge_status["vectors"]["total"],
+                "fully_synced": knowledge_status["summary"]["fully_synced_count"],
+                "issues": knowledge_status.get("issues", {})
+            },
+            "cache": stats.get("cache", {}),
+            "bm25_index": {
+                "initialized": bm25._initialized,
+                "document_count": len(bm25.documents) if bm25._initialized else 0
+            }
+        }
+    except Exception as e:
+        return {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+
+@app.get("/metrics", tags=["monitoring"])
+async def metrics():
+    """系统性能指标 - 用于监控和调试"""
+    import time
+
+    try:
+        from pymilvus import connections, Collection
+        connections.connect(uri="milvus:19530")
+
+        # Milvus 指标
+        collection = Collection("context")
+        collection.load()
+        milvus_metrics = {
+            "total_entities": collection.num_entities,
+            "index_count": len(collection.indexes),
+        }
+
+        # 会话指标
+        chat_ids = await postgres_storage.list_conversations()
+
+        # RAG 缓存指标
+        from enhanced_rag import get_query_cache
+        cache = get_query_cache()
+
+        return {
+            "timestamp": time.time(),
+            "milvus": milvus_metrics,
+            "conversations": {
+                "total": len(chat_ids)
+            },
+            "rag_cache": {
+                "cached_queries": len(cache.cache),
+                "ttl": cache.ttl
+            },
+            "system": {
+                "python_version": "3.10+",
+                "environment": "production"
+            }
+        }
+    except Exception as e:
+        return {
+            "error": str(e),
+            "timestamp": time.time()
+        }
+
+
+@app.get("/debug/config", tags=["debug"])
+async def debug_config():
+    """调试端点 - 查看当前配置 (仅开发环境)"""
+    try:
+        config = config_manager.read_config()
+        return {
+            "sources_count": len(config.sources),
+            "selected_sources_count": len(config.selected_sources or []),
+            "current_model": config.get_selected_model(),
+            "current_chat_id": config.current_chat_id
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.post("/debug/rebuild-bm25", tags=["debug"])
+async def rebuild_bm25_index():
+    """重建 BM25 索引"""
+    from enhanced_rag import get_bm25_indexer
+    indexer = get_bm25_indexer()
+    indexer.initialize()
+    return {
+        "status": "success",
+        "document_count": len(indexer.documents)
+    }
+
 @app.exception_handler(APIError)
 async def api_error_handler(request, exc: APIError):
     """处理自定义 APIError 异常"""
@@ -271,6 +465,58 @@ app.include_router(openai_router)
 from fastapi import APIRouter
 
 api_v1_router = APIRouter(prefix="/api/v1")
+
+
+# --- RAG Resources (RESTful) ---
+
+class RagQueryRequest(BaseModel):
+    """RAG 查询请求"""
+    query: str
+    sources: Optional[List[str]] = None
+    top_k: int = 5
+    use_hybrid: bool = True
+    use_cache: bool = True
+
+
+@api_v1_router.post("/rag/query", tags=["rag"])
+async def rag_query_v1(request: RagQueryRequest):
+    """RAG 查询接口 (RESTful 风格)
+
+    使用混合搜索 (BM25 + Vector) 进行检索
+    """
+    from enhanced_rag import enhanced_rag_query
+
+    result = await enhanced_rag_query(
+        query=request.query,
+        sources=request.sources,
+        top_k=request.top_k,
+        use_hybrid=request.use_hybrid,
+        use_cache=request.use_cache
+    )
+
+    return {"data": result}
+
+
+@api_v1_router.get("/rag/stats", tags=["rag"])
+async def rag_stats_v1():
+    """RAG 系统统计"""
+    from enhanced_rag import get_stats
+    return {"data": get_stats()}
+
+
+@api_v1_router.get("/rag/config", tags=["rag"])
+async def rag_config_v1():
+    """RAG 配置信息"""
+    return {
+        "data": {
+            "embedding_dimensions": 2560,
+            "chunk_size": 512,
+            "chunk_overlap": 128,
+            "hybrid_search": True,
+            "cache_ttl": 3600
+        }
+    }
+
 
 # 速率限制装饰器（如果可用）
 # 注意：slowapi 需要函数签名包含 request 参数，这里暂时禁用
@@ -1746,28 +1992,30 @@ class LlamaIndexQueryRequest(BaseModel):
     sources: Optional[List[str]] = None
     use_cache: bool = True
     top_k: int = 10
+    use_hybrid: bool = True  # 启用真正的混合搜索 (BM25 + Vector)
 
 
 @app.post("/rag/llamaindex/query")
 async def llamaindex_query(request: LlamaIndexQueryRequest):
     """Query using LlamaIndex enhanced RAG.
-    
+
     This endpoint uses LlamaIndex with advanced features:
-    - Hybrid search (vector + keyword)
+    - Hybrid search (BM25 + vector) - now truly implemented!
     - Multiple chunking strategies
     - Query caching
-    - Custom Qwen3 embeddings
+    - Custom Qwen3 embeddings (2560 dimensions)
     """
     try:
         from enhanced_rag import enhanced_rag_query
-        
+
         result = await enhanced_rag_query(
             query=request.query,
             sources=request.sources,
             use_cache=request.use_cache,
             top_k=request.top_k,
+            use_hybrid=request.use_hybrid,
         )
-        
+
         return result
         
     except Exception as e:

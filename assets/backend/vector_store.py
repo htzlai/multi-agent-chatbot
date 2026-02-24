@@ -35,26 +35,36 @@ import requests
 
 class CustomEmbeddings:
     """Wraps qwen3 embedding model to match OpenAI format with parallel processing"""
-    
+
+    # Qwen3-Embedding-4B 模型的实际输出维度 (实测为 2560)
+    # 注意: 此维度必须与 embedding 服务返回的实际维度匹配
+    DEFAULT_EMBEDDING_DIMENSION = 2560
+
+    # 用于 fallback 的零向量维度 - 必须与实际服务返回维度一致
+    _FALLBACK_DIMENSION: int = None  # 运行时动态确定
+
     def __init__(
-        self, 
-        model: str = "Qwen3-Embedding-4B-Q8_0.gguf", 
+        self,
+        model: str = "Qwen3-Embedding-4B-Q8_0.gguf",
         host: str = "http://qwen3-embedding:8000",
         max_workers: int = 10,
-        batch_size: int = 100
+        batch_size: int = 100,
+        dimensions: int = None
     ):
         """Initialize CustomEmbeddings with parallel processing support.
-        
+
         Args:
             model: Embedding model name
             host: Embedding service host URL
             max_workers: Maximum parallel workers for embedding requests
             batch_size: Batch size for processing (for future batching optimization)
+            dimensions: Embedding dimension (实测 Qwen3-Embedding-4B 输出 2560 维)
         """
         self.model = model
         self.url = f"{host}/v1/embeddings"
         self.max_workers = max_workers
         self.batch_size = batch_size
+        self.dimensions = dimensions or self.DEFAULT_EMBEDDING_DIMENSION
 
     def _get_embedding(self, text: str) -> List[float]:
         """Get embedding for a single text (helper for parallel processing)."""
@@ -70,8 +80,8 @@ class CustomEmbeddings:
             return data["data"][0]["embedding"]
         except Exception as e:
             logger.warning(f"Failed to get embedding: {e}")
-            # Return zero vector as fallback
-            return [0.0] * 1536  # Common embedding dimension
+            # Return zero vector as fallback - 使用实际维度 2560
+            return [0.0] * self.dimensions
 
     def __call__(self, texts: list[str]) -> list[list[float]]:
         """Get embeddings for multiple texts using parallel processing.
@@ -109,7 +119,8 @@ class CustomEmbeddings:
                     embeddings[index] = future.result()
                 except Exception as e:
                     logger.warning(f"Embedding failed for index {index}: {e}")
-                    embeddings[index] = [0.0] * 1536
+                    # 使用实际维度 2560
+                    embeddings[index] = [0.0] * self.dimensions
         
         return embeddings
 
@@ -159,8 +170,8 @@ class VectorStore:
             self._load_source_mapping()
 
             self.text_splitter = RecursiveCharacterTextSplitter(
-                chunk_size=1000,
-                chunk_overlap=200
+                chunk_size=512,    # 优化: 从 1000 调整为 512 (官方推荐 256-512 tokens)
+                chunk_overlap=128  # 优化: 从 200 调整为 128 (约 25% chunk_size)
             )
 
             logger.debug({
