@@ -1,0 +1,74 @@
+# .clinerules - DGX Spark Multi-Agent Chatbot
+Last Updated: 2026-02-24
+
+## PROJECT STRUCTURE
+assets/backend/
+├── app/
+│   ├── main.py              # FastAPI entry (ONLY registration)
+│   ├── routers/             # Route handlers
+│   ├── services/           # Business logic
+│   ├── dependencies/       # DI providers
+│   └── infrastructure/     # External wrappers
+
+## CORE RULES
+
+### R1. Single Responsibility
+- main.py: Create app, register routers ONLY
+- routers/: HTTP handling, delegate to services
+- services/: Business logic ONLY
+- infrastructure/: External API wrappers ONLY
+
+### R2. No Direct Infrastructure in Routers
+FORBIDDEN: from pymilvus import connections
+REQUIRED: from dependencies.providers import get_postgres_storage
+         @router.get("/chats")
+         def get_chats(storage = Depends(get_postgres_storage)):
+
+### R3. API Conventions
+- Use /api/v1/ prefix for all new endpoints
+- Response: {"data": {...}} or {"error": {"code": "...", "message": "..."}}
+
+### R4. Service Layer
+- All business logic in services/
+- Services return dicts, never raw DB objects
+- Use custom exceptions: ChatNotFoundError, KnowledgeSyncError
+
+### R5. Dependency Injection
+- Use FastAPI Depends() for all dependencies
+- No global variables (agent, postgres_storage, etc.)
+- Use lru_cache for singletons
+
+### R6. Import Order (PEP 8)
+# 1. Standard library
+# 2. Third-party
+# 3. Local application
+
+## REFACTORING WORKFLOW
+
+### Phase 1: Split Routers
+1. Create routers/ directory
+2. Move route handlers from main.py to routers/*.py
+3. Register routers in main.py
+
+### Phase 2: Extract Services
+1. Create services/ directory
+2. Move business logic to services
+3. Update routers to call services
+
+### Phase 3: Add Dependency Injection
+1. Create dependencies/providers.py
+2. Replace global vars with Depends()
+3. Remove global variable declarations
+
+### Phase 4: Cleanup Legacy Routes
+- Remove duplicate endpoints (keep only /api/v1/)
+
+## VERIFICATION
+After each phase:
+- pytest tests/ passes
+- curl http://localhost:8000/health returns 200
+- Core endpoints work
+
+## CURRENT STATE
+- main.py: 2279 lines (TOO LONG)
+- Target: <200 lines

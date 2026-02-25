@@ -376,15 +376,20 @@ def get_redis_query_cache() -> RedisQueryCache:
 # LLM client for answer generation
 _llm_client = None
 
+# LLM configuration constants
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://gpt-oss-120b:8000/v1")
+LLM_API_KEY = os.getenv("LLM_API_KEY", "api_key")
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-oss-120b")
+
+
 def get_llm_client():
     """Get or create the LLM client."""
     global _llm_client
     if _llm_client is None:
         from openai import AsyncOpenAI
-        # Use the model from environment or default
         _llm_client = AsyncOpenAI(
-            base_url="http://gpt-oss-120b:8000/v1",
-            api_key="api_key"
+            base_url=LLM_BASE_URL,
+            api_key=LLM_API_KEY
         )
     return _llm_client
 
@@ -418,7 +423,7 @@ def _generate_answer_with_llm(query: str, context: str) -> str:
         try:
             response = loop.run_until_complete(
                 client.chat.completions.create(
-                    model="gpt-oss-120b",
+                    model=LLM_MODEL,
                     messages=[
                         {"role": "system", "content": prompt},
                         {"role": "user", "content": query}
@@ -440,7 +445,6 @@ def _generate_answer_with_llm(query: str, context: str) -> str:
 
 # Global instances
 _embedding_model: Optional[Qwen3Embedding] = None
-_query_cache: Optional[QueryCache] = None
 
 
 def get_embedding_model() -> Qwen3Embedding:
@@ -993,7 +997,7 @@ class HyDEQueryExpander:
 假设文档："""
 
             response = await self.llm_client.chat.completions.create(
-                model="gpt-oss-120b",
+                model=LLM_MODEL,
                 messages=[
                     {"role": "system", "content": "你是一个专业的文档生成助手。"},
                     {"role": "user", "content": prompt}
@@ -1356,7 +1360,9 @@ def get_stats() -> Dict[str, Any]:
         logger.error(f"Error getting Milvus stats: {e}")
         total_entities = 0
     
-    cache = get_query_cache()
+    # Use Redis-backed query cache for accurate stats
+    redis_cache = get_redis_query_cache()
+    redis_stats = redis_cache.get_stats()
     
     return {
         "index": {
@@ -1367,7 +1373,9 @@ def get_stats() -> Dict[str, Any]:
         },
         "cache": {
             "enabled": True,
-            "ttl": cache.ttl,
-            "cached_queries": len(cache.cache),
+            "backend": redis_stats.get("backend", "memory"),
+            "redis_available": redis_stats.get("redis_available"),
+            "ttl": redis_stats.get("ttl"),
+            "cached_queries": redis_stats.get("redis_keys", 0),
         }
     }

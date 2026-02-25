@@ -31,10 +31,13 @@ export default function ChatPage() {
   React.useEffect(() => {
     const fetchCurrentChatId = async () => {
       try {
-        const response = await fetch("/api/chat_id");
+        const response = await fetch("/api/v1/chats/current");
         if (response.ok) {
-          const { chat_id } = await response.json();
-          setCurrentChatId(chat_id);
+          const json = await response.json();
+          const chat_id = json.data?.chat_id;
+          if (chat_id) {
+            setCurrentChatId(chat_id);
+          }
         }
       } catch (error) {
         console.error("Error fetching current chat ID:", error);
@@ -47,11 +50,12 @@ export default function ChatPage() {
   // Fetch chat history
   const fetchChatHistory = async () => {
     try {
-      const response = await fetch("/api/chats");
+      const response = await fetch("/api/v1/chats");
       if (response.ok) {
-        const data = await response.json();
-        // Transform chat IDs to history items
-        const historyItems: ChatHistoryItem[] = (data.chats || []).map((id: string, index: number) => ({
+        const json = await response.json();
+        // Transform chat IDs to history items - v1 format: {data: ["id1", "id2"]}
+        const chatIds = json.data || [];
+        const historyItems: ChatHistoryItem[] = chatIds.map((id: string, index: number) => ({
           id,
           name: `Chat ${index + 1}`,
         }));
@@ -147,27 +151,30 @@ export default function ChatPage() {
   // Handle new chat
   const handleNewChat = async () => {
     try {
-      const response = await fetch("/api/chat/new", {
+      const response = await fetch("/api/v1/chats", {
         method: "POST",
       });
 
       if (response.ok) {
-        const data = await response.json();
-        setCurrentChatId(data.chat_id);
-        setMessages([]);
-        setStreamingContent("");
-        await fetchChatHistory();
+        const json = await response.json();
+        const chat_id = json.data?.chat_id;
+        if (chat_id) {
+          setCurrentChatId(chat_id);
+          setMessages([]);
+          setStreamingContent("");
+          await fetchChatHistory();
+        }
       }
     } catch (error) {
       console.error("Error creating new chat:", error);
     }
   };
 
-  // Handle select chat
+  // Handle select chat - set as current
   const handleSelectChat = async (chatId: string) => {
     try {
-      const response = await fetch("/api/chat_id", {
-        method: "POST",
+      const response = await fetch("/api/v1/chats/current", {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ chat_id: chatId }),
       });
@@ -185,7 +192,7 @@ export default function ChatPage() {
   // Handle delete chat
   const handleDeleteChat = async (chatId: string) => {
     try {
-      const response = await fetch(`/api/chat/${chatId}`, {
+      const response = await fetch(`/api/v1/chats/${chatId}`, {
         method: "DELETE",
       });
 

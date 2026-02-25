@@ -1,462 +1,325 @@
-# 后端代码设计批判性分析报告
+# DGX Spark 后端代码评审报告
 
-> 分析日期: 2026-02-22  
-> 分析师: Claude Code (AI Engineering Advisor)  
-> 参考依据: FastAPI 官方文档、OpenAI API 标准、PostgreSQL/Milvus 最佳实践、RESTful API 设计规范
-
----
-
-## 📋 执行摘要
-
-经过对后端代码的全面审查，从**架构设计**、**安全性**、**性能**、**可维护性**、**可扩展性**五个维度进行评估。
-
-### 总体评价: ⭐⭐⭐⭐☆ (4/5)
-
-**优点**:
-- 架构清晰，分层合理
-- 数据库存储设计优秀（缓存 + 批处理）
-- 实现了 OpenAI 兼容 API
-- 支持 WebSocket 实时通信
-
-**需要改进**:
-- 部分 API 设计不符合 REST 最佳实践
-- 认证实现存在安全隐患
-- 错误处理不够统一
-- 缺乏完整的 API 版本控制
+> 分析日期: 2026-02-24  
+> 基于代码底层第一性原理分析  
+> ⚠️ 此文档基于实际代码分析，请以代码为准
 
 ---
 
-## 1. 架构设计分析
+## 一、整体评分
 
-### 1.1 分层架构 ✅ 优秀
-
-```
-main.py (API Layer)
-    ├── openai_compatible/router.py (OpenAI 兼容层)
-    ├── agent.py (业务逻辑层)
-    ├── postgres_storage.py (数据访问层)
-    └── vector_store.py (向量存储层)
-```
-
-**评价**: 遵循了良好的分层原则，每层职责明确。
-
-### 1.2 配置管理 ⚠️ 需改进
-
-**当前实现** (`config.py`):
-- 使用本地 JSON 文件存储配置
-- 线程安全锁 (`threading.Lock`)
-- 基于文件 mtime 的缓存
-
-**问题**:
-1. **单点故障**: JSON 文件损坏会导致整个服务不可用
-2. **无配置版本管理**: 无法回滚配置
-3. **多实例部署困难**: 文件系统不共享
-
-**业界最佳实践**:
-- 使用 **Consul/Etcd** 进行配置管理
-- 或使用 **数据库 + 缓存** 双层配置
-- 参考: [12-Factor App Config](https://12factor.net/config)
+| 维度 | 评分 | 说明 |
+|------|------|------|
+| **基础设施** | 8.5/10 | PostgreSQL + Milvus + Redis + Langfuse + 本地 LLM + Embedding，组件成熟 |
+| **代码架构** | 4.0/10 | main.py 约1800行，职责过载，路由混杂 |
+| **RAG 管线** | 7.0/10 | 混合搜索、双层缓存、重排序、HyDE 功能完整 |
+| **可维护性** | 3.5/10 | 重复路由、全局变量、散落直连代码 |
+| **综合** | 5.5/10 | 功能完整，代码组织待优化 |
 
 ---
 
-*** API 设计分析
+## 二、代码架构分析
 
- 2.1 RESTful 规范 ⚠️ 部分不符合
+### 2.1 文件结构
 
-#### 问题 1: 路径命名不一致
-
-| 当前路径 | 问题 | 建议 |
-|---------|------|------|
-| `/chat_id` | 名词单数，不符合资源集合 | `/chats/current` |
-| `/chat/new` | `new` 是动作，不是资源 | POST `/chats` |
-| `/sources/reindex` | `reindex` 是动词 | POST `/sources:reindex` 或 POST `/sources/batch-reindex` |
-
-**参考**: [Microsoft REST API Guidelines - URL Design](https://github.com/microsoft/api-guidelines/blob/vNext/Guidelines.md#url-design)
-
-#### 问题 2: 缺少 API 版本控制
-
-**当前**: `/v1/chat/completions` 有版本，其他如 `/sources`, `/knowledge` 没有。
-
-**建议**:
 ```
-/api/v1/sources
-/api/v1/knowledge
+backend/
+├── main.py              # ~1800行，核心问题所在
+├── agent.py            # ~600行，LangGraph Agent
+├── enhanced_rag.py     # ~1000行，RAG 引擎
+├── vector_store.py     # ~600行，Milvus 封装
+├── postgres_storage.py # ~500行，会话存储
+├── auth.py             # ~120行，JWT 认证
+├── errors.py           # ~200行，统一错误
+├── config.py           # ~150行，配置管理
+├── models.py           # ~40行，Pydantic 模型
+├── client.py           # ~80行，MCP 客户端
+├── langfuse_client.py  # ~50行，可观测性
+├── logger.py           # 日志封装
+├── utils.py            # 工具函数
+└── prompts.py          # 提示词模板
 ```
 
-或使用 Header:
-```
-Accept: application/vnd.chatbot.v1+json
-```
+### 2.2 main.py 问题分析
 
-**参考**: [Stripe API Versioning](https://stripe.com/blog/api-versioning)
+**核心问题**: 单文件过大，职责混杂
 
-#### 问题 3: HTTP 方法使用不当
+| 代码位置 | 问题 | 影响 |
+|----------|------|------|
+| main.py:72-99 | lifespan 初始化逻辑 | 启动逻辑过长 |
+| main.py:147-228 | /health 健康检查 | 监控逻辑混杂 |
+| main.py:480-700 | RESTful v1 路由 | 新旧路由并存 |
+| main.py:685-757 | WebSocket 处理 | 实时通信逻辑混杂 |
+| main.py:779-829 | /ingest 文件摄取 | 业务逻辑直接写入 |
+| main.py:858-907 | /sources/vector-counts | pymilvus 直连 |
+| main.py:1078-1173 | /knowledge/status | pymilvus 直连 |
+| main.py:1751-1778 | /rag/llamaindex/query | 核心 RAG 端点混杂 |
 
-| 当前 | 建议 |
+**当前 main.py 包含的职责**:
+- ✅ FastAPI 应用创建
+- ✅ 生命周期管理
+- ✅ CORS 中间件
+- ✅ 统一错误处理
+- ❌ 健康检查逻辑 (应拆分)
+- ❌ 聊天 CRUD (应拆分)
+- ❌ 知识库管理 (应拆分)
+- ❌ RAG 查询 (应拆分)
+- ❌ 管理员功能 (应拆分)
+- ❌ WebSocket 处理 (应拆分)
+- ❌ pymilvus 直连 (应封装)
+
+---
+
+## 三、具体问题清单
+
+### 3.1 路由重复问题
+
+| Legacy 路由 | V1 路由 | 代码位置 |
+|-------------|---------|----------|
+| `GET /sources` | `GET /api/v1/sources` | main.py:844 vs main.py:527 |
+| `GET /chat_id` | `GET /api/v1/chats/current` | main.py:1009 vs main.py:602 |
+| `POST /chat/new` | `POST /api/v1/chats` | main.py:1060 vs main.py:575 |
+| `POST /chat/rename` | `PATCH /api/v1/chats/{id}/metadata` | main.py:1036 vs main.py:680 |
+| `DELETE /chat/{id}` | `DELETE /api/v1/chats/{id}` | main.py:1086 vs main.py:697 |
+
+**问题**: 27个旧接口仍在维护，前端需兼容两套
+
+### 3.2 pymilvus 散落问题
+
+**至少7处直接 import**:
+
+| 位置 | 用途 |
 |------|------|
-| POST `/chat/rename` | PATCH `/chats/{chat_id}` |
-| POST `/chat/new` | POST `/chats` |
-| DELETE `/chats/clear` | DELETE `/chats` (批量) 或 POST `/chats:clear` |
+| main.py:155 | 健康检查 |
+| main.py:858 | 向量计数 |
+| main.py:1106 | 知识库状态 |
+| enhanced_rag.py:145 | 向量搜索 |
+| enhanced_rag.py:328 | BM25 初始化 |
+| vector_store.py:226 | 存储初始化 |
 
-### 2.2 OpenAI 兼容 API ✅ 良好
+**建议**: 全部收拢到 `vector_store.py`
 
-**实现评价**:
-- ✅ 正确实现了 `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`
-- ✅ 支持流式输出 (SSE)
-- ✅ 错误格式兼容
+### 3.3 全局变量问题
 
-**可改进点**:
-1. 缺少 `stream_options` 参数支持
-2. 缺少完整的 `usage` 统计
-3. 未实现 `max_tokens`, `temperature` 等参数的代理
+```python
+# main.py:60-70
+config_manager = ConfigManager("./config.json")
+postgres_storage = PostgreSQLConversationStorage(...)
+vector_store = create_vector_store_with_config(config_manager)
+agent: ChatAgent | None = None
+active_connections: Dict[str, Set[WebSocket]] = {}
+```
 
-### 2.3 WebSocket 设计 ✅ 优秀
+**问题**: 
+- 无法单元测试 mock
+- 多实例部署困难
+- 依赖顺序敏感
 
-**亮点**:
-- 支持双向通信
-- 有 `stop` 消息中断生成
-- 完善的连接管理 (`active_connections`, `connection_tasks`)
-- 消息类型丰富 (`token`, `tool_token`, `node_start/end`)
+### 3.4 响应格式不统一
 
-**可改进**:
-- 缺少心跳机制 (heartbeat/ping-pong)
-- 缺少连接超时处理
-- 建议添加: `ws://host/ws/chat?token=xxx`
+| 接口 | 响应格式 |
+|------|----------|
+| `/api/v1/chats` | `{"data": [...]}` |
+| `/health` | `{"status": "healthy", "services": {...}}` |
+| `/sources` | `{"sources": [...]}` |
+| `/knowledge/status` | `{"status": "ok", "config": {...}}` |
 
 ---
 
-## 3. 安全性分析
+## 四、代码亮点
 
-### 3.1 认证机制 ⚠️ 存在隐患
+### 4.1 PostgreSQL 存储设计 (postgres_storage.py)
 
-#### 问题 1: JWT 验证过于宽松
-
-```python:auth.py
-options={
-    "verify_aud": False,  # ❌ 不验证 audience
-    "verify_iss": False,  # ❌ 不验证 issuer
-}
-```
-
-**风险**: 如果 JWT secret 泄露，攻击者可以伪造任意用户身份的 token。
-
-**修复建议**:
 ```python
-options={
-    "verify_aud": True,
-    "verify_iss": True,
-    "verify_exp": True,
-}
-payload = jwt.decode(
-    token,
-    SUPABASE_JWT_SECRET,
-    algorithms=["HS256"],
-    audience="authenticated",
-    issuer=f"{SUPABASE_URL}/",
+# 亮点1: 连接池
+self.pool = await asyncpg.create_pool(
+    min_size=2,
+    max_size=self.pool_size,
 )
+
+# 亮点2: 三级缓存
+self._message_cache: Dict[str, CacheEntry]
+self._metadata_cache: Dict[str, CacheEntry]
+self._image_cache: Dict[str, CacheEntry]
+
+# 亮点3: 批处理保存
+self._batch_save_task = asyncio.create_task(self._batch_save_worker())
 ```
 
-#### 问题 2: 部分接口无认证
+**评价**: ✅ 优秀，生产级设计
 
-检查 `main.py` 发现以下接口**可能**未强制认证:
-- `/sources` - 知识库列表 (泄露数据源)
-- `/selected_sources` - 选中的源 (泄露配置)
-- `/admin/*` - 管理员接口 (敏感操作)
+### 4.2 RAG 引擎设计 (enhanced_rag.py)
 
-**建议**: 使用 FastAPI 依赖注入统一认证:
 ```python
+# 亮点1: 双层缓存
+class RedisQueryCache:
+    # Redis 持久化 + Memory 降级
+    def __init__(self, use_redis=True, memory_fallback=True):
+
+# 亮点2: 混合搜索
+def hybrid_search(query, ...):
+    # BM25 + Vector + RRF 融合
+
+# 亮点3: HyDE 查询扩展
+class HyDEQueryExpander:
+    # 假设文档生成
+```
+
+**评价**: ✅ 功能完整，技术选型合理
+
+### 4.3 Agent 架构 (agent.py)
+
+```python
+# 亮点1: LangGraph 状态机
+workflow = StateGraph(State)
+workflow.add_node("generate", self.generate)
+workflow.add_node("action", self.tool_node)
+
+# 亮点2: MCP 工具集成
+self.mcp_client = await MCPClient().init()
+
+# 亮点3: 流式输出 + 取消支持
+async def _stream_response(self, stream, stop_event=None):
+```
+
+**评价**: ✅ 架构清晰，符合最佳实践
+
+### 4.4 向量存储 (vector_store.py)
+
+```python
+# 亮点1: 10线程并行 embedding
+with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+
+# 亮点2: 文本提取优先级
+# UnstructuredLoader → PyPDF → raw text
+
+# 亮点3: 动态度量检测
+metric_type = "IP"  # 运行时检测
+```
+
+**评价**: ✅ 性能优化到位
+
+### 4.5 错误处理 (errors.py)
+
+```python
+# 亮点: RFC 7807 统一格式
+class ErrorCode:
+    VALIDATION_ERROR = "VALIDATION_ERROR"
+    UNAUTHORIZED = "UNAUTHORIZED"
+    RAG_QUERY_ERROR = "RAG_QUERY_ERROR"
+```
+
+**评价**: ✅ 标准遵循良好
+
+---
+
+## 五、重构建议
+
+### 5.1 第一步: 拆分路由 (风险最低)
+
+```
+routers/
+├── __init__.py
+├── health.py      # /health, /health/rag, /metrics
+├── chats.py       # /api/v1/chats/*
+├── knowledge.py   # /knowledge/*, /sources/*
+├── rag.py        # /rag//*
+├── admin.py      # /adminllamaindex/*
+└── config.py     # /selected_model, /available_models
+```
+
+**目标**: main.py 只保留应用创建和路由注册
+
+### 5.2 第二步: 统一响应格式
+
+```python
+# 统一成功响应
+{"data": {...}}
+
+# 统一错误响应
+{"error": {"code": "xxx", "message": "xxx", "details": {}}}
+```
+
+### 5.3 第三步: 封装基础设施
+
+```python
+# 创建一个统一的 infrastructure 模块
+infrastructure/
+├── __init__.py
+├── milvus_client.py  # 封装所有 pymilvus 操作
+├── postgres_client.py # 封装 pg 操作
+└── cache.py         # 统一缓存接口
+```
+
+### 5.4 第四步: 依赖注入
+
+```python
+# dependencies.py
 from fastapi import Depends
-from auth import get_current_user
 
-@app.get("/sources", dependencies=[Depends(get_current_user)])
-async def get_sources():
-    ...
-```
+def get_postgres_storage():
+    return postgres_storage
 
-
-## 4. 数据库设计分析
-
-### 4.1 PostgreSQL 存储 ✅ 优秀
-
-**亮点**:
-1. **连接池**: 使用 `asyncpg` 连接池 (min=2, max=10)
-2. **内存缓存**: 多层缓存 (messages, metadata, images, chat_list)
-3. **批处理写入**: 后台 worker 每秒批量保存，减少 I/O
-4. **TTL 支持**: 图像过期自动清理
-5. **缓存统计**: 提供 `get_cache_stats()` 监控
-
-**性能数据** (代码分析):
-- 缓存 TTL: 6 小时 (messages), 1 小时 (images)
-- 批处理间隔: 1 秒
-- 预期缓存命中率: 高 (取决于使用模式)
-
-**建议**:
-1. 添加缓存预热 (warm-up) 机制
-2. 实现缓存指标导出 (Prometheus)
-
-### 4.2 表结构设计 ✅ 合理
-
-```sql
-conversations (chat_id PK, messages JSONB, timestamps)
-chat_metadata (chat_id PK, name, FK → conversations)
-images (image_id PK, image_data TEXT, expires_at)
-```
-
-**评价**:
-- ✅ 使用 JSONB 存储 messages，灵活
-- ✅ 有索引 (`idx_conversations_updated_at`, `idx_images_expires_at`)
-- ✅ 有自动更新 `updated_at` 触发器
-
-**可改进**:
-1. 添加 `user_id` 字段实现多租户隔离
-2. 添加 `deleted_at` 实现软删除
-
----
-
-## 5. 向量存储设计
-
-### 5.1 Milvus 设计 ✅ 良好
-
-**亮点**:
-1. 统一的 collection (`context`) 存储所有文档
-2. 按 `source` 过滤支持多源检索
-3. 支持批量删除 (`delete_by_source`)
-4. 多种加载方式 (UnstructuredLoader, PyPDF, 原始文本)
-
-### 5.2 Embedding 性能 ⚠️ 需优化
-
-**当前实现** (`vector_store.py`):
-```python
-def __call__(self, texts: list[str]) -> list[list[float]]:
-    embeddings = []
-    for text in texts:  # ❌ 串行处理
-        response = requests.post(self.url, ...)
-        embeddings.append(data["data"][0]["embedding"])
-    return embeddings
-```
-
-**问题**: 串行请求，效率低下。
-
-**改进**:
-```python
-def __call__(self, texts: list[str]) -> list[list[float]]:
-    import concurrent.futures
-    
-    def get_embedding(text):
-        response = requests.post(self.url, json={"input": text, "model": self.model})
-        return response.json()["data"][0]["embedding"]
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        embeddings = list(executor.map(get_embedding, texts))
-    return embeddings
-```
-
-**参考**: [LangChain - Embedding Models](https://python.langchain.com/docs/modules/data_connection/text_embedding/)
-
-### 5.3 Chunk 大小配置
-
-**当前**:
-```python
-chunk_size=1000
-chunk_overlap=200
-```
-
-**评估**: 合理默认值，但可根据实际文档类型调整。
-
----
-
-## 6. Agent/LangGraph 架构
-
-### 6.1 设计 ✅ 优秀
-
-**亮点**:
-1. 使用 **LangGraph** 状态机，工作流清晰
-2. 支持 MCP 工具调用
-3. 有 Langfuse 可观测性集成
-4. 支持图像处理
-
-### 6.2 问题
-
-1. **硬编码的 `max_iterations = 3`**: 应可配置
-2. **单例 Agent**: 无法支持多模型动态切换
-3. **状态持久化**: 使用 `MemorySaver` (内存)，重启丢失
-
-**建议**:
-- 生产环境应使用 `PostgresSaver` 或 `RedisSaver`
-- 参考: [LangGraph - Checkpointers](https://langchain-ai.github.io/langgraph/how-tos/persistence/)
-
----
-
-## 7. 错误处理与日志
-
-### 7.1 错误处理 ⚠️ 不统一
-
-**问题**:
-- 有的返回 `{"detail": "..."}`
-- 有的返回 `{"status": "error", "message": "..."}`
-- WebSocket 返回 `{"type": "error", "content": "..."}`
-
-**建议**: 统一错误响应格式
-
-```python
-class APIError(BaseException):
-    def __init__(self, code: str, message: str, status_code: int = 400):
-        self.code = code
-        self.message = message
-        self.status_code = status_code
-
-# 统一响应
-{
-    "error": {
-        "code": "SOURCE_NOT_FOUND",
-        "message": "指定的源不存在",
-        "details": {}
-    }
-}
-```
-
-### 7.2 日志 ✅ 良好
-
-使用结构化日志 (logger with dict)，便于查询分析。
-
----
-
-## 8. 性能优化建议
-
-### 8.1 已实现 ✅
-
-| 优化项 | 实现 |
-|--------|------|
-| 连接池 | asyncpg |
-| 内存缓存 | 多层 LRU |
-| 批处理写入 | 每秒批量保存 |
-| 异步处理 | async/await |
-
-### 8.2 建议添加
-
-| 优化项 | 说明 |
-|--------|------|
-| **Redis 缓存** | 分布式部署时共享缓存 |
-| **GZIP 压缩** | SSE 响应压缩 |
-| **连接复用** | HTTPX 客户端单例 |
-| **查询结果缓存** | RAG 结果缓存 |
-
----
-
-## 9. 可扩展性分析
-
-### 9.1 水平扩展 ⚠️ 受限
-
-**当前**:
-- ConfigManager 使用本地文件
-- 内存缓存不共享
-- Agent 是单例
-
-**限制**: 无法直接部署多实例。
-
-### 9.2 微服务化潜力 ✅
-
-当前架构已具备良好的模块化，可拆分:
-- `api-service` - API 网关
-- `agent-service` - Agent 计算
-- `rag-service` - 向量检索
-- `storage-service` - 持久化
-
----
-
-## 10. 改进优先级
-
-### 🔴 高优先级 (安全性)
-
-1. [ ] 修复 JWT 验证 (verify_aud, verify_iss)
-2. [ ] 添加管理员接口认证
-
-### 🟡 中优先级 (可靠性)
-
-5. [ ] 统一错误响应格式
-6. [ ] 添加 API 版本控制
-7. [ ] 修正 RESTful 路径命名
-8. [ ] 添加 WebSocket 心跳
-
-### 🟢 低优先级 (优化)
-
-9. [ ] Embedding 并行请求
-10. [ ] LangGraph 持久化 (PostgresSaver)
-11. [ ] Redis 分布式缓存
-12. [ ] 配置中心化 (Consul/Etcd)
-
----
-
-## 11. 给前端开发人员的建议
-
-### 11.1 API 调用策略
-
-1. **对话**: 使用 WebSocket (实时性好) 或 SSE (兼容性好)
-2. **RAG 查询**: 使用 REST (简单直接)
-3. **文件上传**: 使用 FormData + 进度回调
-
-### 11.2 错误处理
-
-前端应处理以下错误码:
-
-| 状态码 | 含义 | 前端动作 |
-|--------|------|----------|
-| 400 | 请求参数错误 | 提示用户修正 |
-| 401 | 未认证 | 跳转登录 |
-| 429 | 速率限制 | 提示稍后重试 |
-| 500 | 服务器错误 | 提示联系管理员 |
-
-### 11.3 推荐的 API 调用方式
-
-```typescript
-// 使用 SSE 流式 (推荐)
-const response = await fetch('/v1/chat/completions', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'Authorization': `Bearer ${token}`
-  },
-  body: JSON.stringify({
-    model: 'gpt-oss-120b',
-    messages: [{ role: 'user', content: '你好' }],
-    stream: true
-  })
-});
-
-const reader = response.body.getReader();
-const decoder = new TextDecoder();
-
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  
-  const chunk = decoder.decode(value);
-  // 解析 SSE 事件...
-}
+async def get_chat_service(
+    storage: PostgreSQLConversationStorage = Depends(get_postgres_storage)
+):
+    return ChatService(storage)
 ```
 
 ---
 
-## 12. 总结
+## 六、重构优先级
 
-### 核心优势
+| 优先级 | 项目 | 工作量 | 收益 |
+|--------|------|--------|------|
+| 🔴 高 | 拆分路由 | 1天 | 代码清晰 |
+| 🔴 高 | 消除重复路由 | 1天 | 维护简化 |
+| 🟡 中 | 封装 pymilvus | 2天 | 架构优化 |
+| 🟡 中 | 统一响应格式 | 0.5天 | 前后端统一 |
+| 🟢 低 | 依赖注入 | 2天 | 可测试性 |
 
-1. **架构清晰**: 分层明确，模块化良好
-2. **性能优化**: 连接池、缓存、批处理
-3. **功能完整**: 对话、RAG、文件管理、实时通信
-4. **OpenAI 兼容**: 便于生态集成
+---
 
-### 主要风险
+## 七、代码位置速查
 
-1. **安全**: JWT 验证不完整，认证覆盖不全
-2. **扩展**: 本地配置和内存缓存限制多实例部署
-3. **规范**: RESTful 设计有改进空间
+### 架构问题
 
-### 总体建议
+| 问题 | 位置 | 重构方案 |
+|------|------|----------|
+| main.py 膨胀 | main.py:1-1905 | 拆分 routers/ |
+| 重复路由 | main.py:480-700 | 废弃 legacy |
+| pymilvus 散落 | main.py:858-1257 | 移入 vector_store.py |
+| 全局变量 | main.py:60-70 | 依赖注入 |
+| 响应不统一 | 各路由函数 | 统一 errors.py |
 
-**当前代码质量**: ⭐⭐⭐⭐☆ (4/5) - 良好，可用于生产，但建议修复高优先级安全问题。
+### 亮点代码
 
-**下一步行动**:
-1. 立即修复认证问题
-2. 完善错误处理
-3. 逐步优化架构以支持水平扩展
+| 模块 | 位置 | 亮点 |
+|------|------|------|
+| PostgreSQL 存储 | postgres_storage.py:1-500 | 连接池+缓存+批处理 |
+| RAG 引擎 | enhanced_rag.py:1-1000 | 混合搜索+缓存+HyDE |
+| Agent | agent.py:1-600 | LangGraph+MCP+流式 |
+| 向量存储 | vector_store.py:1-600 | 并行 embedding+动态检测 |
+| 错误处理 | errors.py:1-200 | RFC 7807 |
+
+---
+
+## 八、总结
+
+### 现状
+- ✅ 基础设施选型正确
+- ✅ 核心功能完整 (RAG + Agent + 实时通信)
+- ✅ 代码有亮点 (存储设计、RAG 管线)
+- ❌ main.py 职责过载
+- ❌ 重复路由维护成本高
+- ❌ 基础设施访问散落
+
+### 原则
+1. **不动基础设施** - PostgreSQL/Milvus/Redis/LLM 保持不变
+2. **先拆文件再改逻辑** - 每步独立可测试
+3. **渐进式重构** - 不求一步到位
+4. **保持功能兼容** - 前端影响最小化
+
+---
+
+*此文档基于代码底层分析，最后更新: 2026-02-24*
