@@ -19,6 +19,7 @@
 import asyncio
 import contextlib
 import json
+import os
 from typing import AsyncIterator, List, Dict, Any, TypedDict, Optional, Callable, Awaitable
 
 import httpx
@@ -39,6 +40,21 @@ from langfuse_client import get_langfuse_client, flush_langfuse
 memory = MemorySaver()
 SENTINEL = object()
 StreamCallback = Callable[[Dict[str, Any]], Awaitable[None]]
+
+# ============================================================
+# 第三方 API 配置
+# ============================================================
+
+# API 类型: "local" (本地模型) 或 "openai" (第三方兼容 API)
+LLM_API_TYPE = os.getenv("LLM_API_TYPE", "local")
+
+# 第三方 API 配置 (Ollama, LM Studio, etc.)
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://gpt-oss-120b:8000/v1")  # 默认本地模型
+LLM_API_KEY = os.getenv("LLM_API_KEY", "api_key")  # 本地模型不需要真实 key
+
+# 可用模型列表 (当使用第三方 API 时)
+EXTERNAL_MODELS = os.getenv("EXTERNAL_MODELS", "").split(",") if os.getenv("EXTERNAL_MODELS") else []
+EXTERNAL_MODEL_NAME = os.getenv("EXTERNAL_MODEL_NAME", "llama3")  # 默认模型名
 
 
 class State(TypedDict, total=False):
@@ -160,34 +176,70 @@ class ChatAgent:
         """
         available_models = self.config_manager.get_available_models()
 
-        try:
-            if model_name in available_models:
-                self.current_model = model_name
-                logger.info(f"Switched to model: {model_name}")
-                # 创建支持请求取消的自定义 httpx 客户端
-                # 使用较长的超时以支持大模型推理，同时允许主动取消
-                self._http_client = httpx.AsyncClient(
-                    timeout=httpx.Timeout(
-                        connect=30.0,      # 连接超时 30 秒
-                        read=300.0,        # 读取超时 5 分钟（大模型可能需要较长时间）
-                        write=30.0,        # 写入超时 30 秒
-                        pool=30.0          # 连接池超时 30 秒
-                    ),
-                    limits=httpx.Limits(
-                        max_connections=10,
-                        max_keepalive_connections=5
+        # 如果使用第三方 API (Ollama, LM Studio 等)
+        if LLM_API_TYPE == "openai":
+            # 第三方 API 使用外部模型列表
+            if EXTERNAL_MODELS:
+                available_models = EXTERNAL_MODELS
+            
+            try:
+                if model_name in available_models or model_name == EXTERNAL_MODEL_NAME:
+                    self.current_model = model_name if model_name in available_models else EXTERNAL_MODEL_NAME
+                    logger.info(f"Switching to external model: {self.current_model} (API: {LLM_BASE_URL})")
+                    
+                    # 创建支持请求取消的自定义 httpx 客户端
+                    self._http_client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(
+                            connect=30.0,
+                            read=300.0,
+                            write=30.0,
+                            pool=30.0
+                        ),
+                        limits=httpx.Limits(
+                            max_connections=10,
+                            max_keepalive_connections=5
+                        )
                     )
-                )
-                self.model_client = AsyncOpenAI(
-                    base_url=f"http://{self.current_model}:8000/v1",
-                    api_key="api_key",
-                    http_client=self._http_client  # 使用自定义客户端
-                )
-            else:
+                    self.model_client = AsyncOpenAI(
+                        base_url=LLM_BASE_URL,
+                        api_key=LLM_API_KEY,
+                        http_client=self._http_client
+                    )
+                else:
+                    raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
+            except Exception as e:
+                logger.error(f"Error setting current model: {e}")
                 raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
-        except Exception as e:
-            logger.error(f"Error setting current model: {e}")
-            raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
+        else:
+            # 本地模型 (默认行为)
+            try:
+                if model_name in available_models:
+                    self.current_model = model_name
+                    logger.info(f"Switched to model: {model_name}")
+                    # 创建支持请求取消的自定义 httpx 客户端
+                    # 使用较长的超时以支持大模型推理，同时允许主动取消
+                    self._http_client = httpx.AsyncClient(
+                        timeout=httpx.Timeout(
+                            connect=30.0,      # 连接超时 30 秒
+                            read=300.0,        # 读取超时 5 分钟（大模型可能需要较长时间）
+                            write=30.0,        # 写入超时 30 秒
+                            pool=30.0          # 连接池超时 30 秒
+                        ),
+                        limits=httpx.Limits(
+                            max_connections=10,
+                            max_keepalive_connections=5
+                        )
+                    )
+                    self.model_client = AsyncOpenAI(
+                        base_url=f"http://{self.current_model}:8000/v1",
+                        api_key="api_key",
+                        http_client=self._http_client  # 使用自定义客户端
+                    )
+                else:
+                    raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
+            except Exception as e:
+                logger.error(f"Error setting current model: {e}")
+                raise ValueError(f"Model {model_name} is not available. Available models: {available_models}")
 
     def should_continue(self, state: State) -> str:
         """Determine whether to continue the tool calling loop.
