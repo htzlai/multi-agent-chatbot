@@ -6,7 +6,7 @@ Chatbot Spark is a fully local multi-agent system built on DGX Spark. With 128GB
 
 At the core is a supervisor agent powered by GPT-OSS-120B, orchestrating specialized downstream agents for coding, retrieval-augmented generation (RAG), and image understanding. Thanks to DGX Spark’s out-of-the-box support for popular AI frameworks and libraries, development and prototyping were fast and frictionless. Together, these components demonstrate how complex, multimodal workflows can be executed efficiently on local, high-performance hardware.
 
-> **Note**: This demo uses ~78 out of the 128GB of DGX Spark's memory by default, so ensure that no other workloads are running on your Spark using `nvidia-smi` or switch to a smaller supervisor model like gpt-oss-20B.
+> **Note**: This demo uses ~100 out of the 128GB of DGX Spark's memory by default, so ensure that no other workloads are running on your Spark using `nvidia-smi` or switch to a smaller supervisor model like gpt-oss-20B.
 
 This project was built to be customizable, serving as a framework that developers can customize. 
 
@@ -34,7 +34,7 @@ This project was built to be customizable, serving as a framework that developer
 | Deepseek-Coder:6.7B-Instruct | Q8           | Coding     | ~ 9.5  GB   |
 | Qwen3-Embedding-4B           | Q8           | Embedding  | ~ 5.39 GB   |
 
-**Total VRAM required:** ~78 GB
+**Total VRAM required:** ~100 GB
 
 > **Warning**:
 > Since the default models use majority of available VRAM, ensure that you don't have anything already running on DGX Spark using `nvidia-smi`. If you do, switch to `gpt-oss-20b` following [this guide](#using-different-models).
