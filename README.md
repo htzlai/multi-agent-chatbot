@@ -44,7 +44,7 @@ The setup includes:
 -  Enough disk space for model downloads
 
 > [!NOTE]
-> This demo uses ~120 out of the 128GB of DGX Spark's memory by default. 
+> This demo uses ~78 out of the 128GB of DGX Spark's memory by default. 
 > Please ensure that no other workloads are running on your Spark using `nvidia-smi`, or switch to a smaller supervisor model like gpt-oss-20B.
 
 
