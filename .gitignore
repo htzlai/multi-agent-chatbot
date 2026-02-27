@@ -1,0 +1,3 @@
+# Claude Code runtime state
+.claude/checkpoints.log
+.claude/settings.json

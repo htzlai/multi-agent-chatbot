@@ -20,4 +20,13 @@ backend/config.json
 frontend/node_modules/
 frontend/.next/
 frontend/build/
+frontend/tsconfig.tsbuildinfo
 node_modules/
+
+# Claude Code
+**/.claude/checkpoints.log
+**/.claude/settings.local.json
+**/.claude/plan/
+
+# Build artifacts
+**/.pytest_cache/
