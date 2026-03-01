@@ -14,6 +14,16 @@ export default defineConfig(({ mode }) => {
     server: {
       host: "::",
       port: 3000,
+      proxy: {
+        "/api": {
+          target: "http://localhost:8000",
+          changeOrigin: true,
+        },
+        "/health": {
+          target: "http://localhost:8000",
+          changeOrigin: true,
+        },
+      },
     },
     plugins: plugins.filter(Boolean) as PluginOption[],
     resolve: {

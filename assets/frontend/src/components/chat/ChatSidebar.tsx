@@ -1,4 +1,4 @@
-import { Plus, MessageSquare } from "lucide-react";
+import { Plus, MessageSquare, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -9,6 +9,7 @@ interface ChatSidebarProps {
   activeId: string | null;
   onSelect: (id: string) => void;
   onNew: () => void;
+  onDelete?: (id: string) => void;
 }
 
 function timeAgo(date: Date): string {
@@ -26,6 +27,7 @@ export default function ChatSidebar({
   activeId,
   onSelect,
   onNew,
+  onDelete,
 }: ChatSidebarProps) {
   return (
     <div className="flex h-full flex-col border-r border-border bg-surface">
@@ -44,22 +46,37 @@ export default function ChatSidebar({
       <ScrollArea className="flex-1">
         <div className="space-y-0.5 p-2">
           {conversations.map((c) => (
-            <button
+            <div
               key={c.id}
-              onClick={() => onSelect(c.id)}
               className={cn(
-                "flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-accent",
+                "group flex w-full items-start gap-2 rounded-lg px-3 py-2.5 text-left transition-colors hover:bg-accent",
                 activeId === c.id && "bg-accent"
               )}
             >
-              <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-foreground">
-                  {c.title}
-                </p>
-                <p className="text-xs text-muted-foreground">{timeAgo(c.updatedAt)}</p>
-              </div>
-            </button>
+              <button
+                onClick={() => onSelect(c.id)}
+                className="flex min-w-0 flex-1 items-start gap-2"
+              >
+                <MessageSquare className="mt-0.5 h-4 w-4 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-foreground">
+                    {c.title}
+                  </p>
+                  <p className="text-xs text-muted-foreground">{timeAgo(c.updatedAt)}</p>
+                </div>
+              </button>
+              {onDelete && (
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onDelete(c.id);
+                  }}
+                  className="mt-0.5 shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           ))}
         </div>
       </ScrollArea>

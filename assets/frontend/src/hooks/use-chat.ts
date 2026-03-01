@@ -1,5 +1,15 @@
-import { useState, useCallback, useRef } from "react";
-import { templates } from "@/lib/mock-templates";
+import { useState, useCallback, useRef, useEffect } from "react";
+import {
+  listChats,
+  createChat,
+  deleteChat,
+  getChatMessages,
+  getChatMetadata,
+  streamCompletion,
+  stopGeneration,
+  type RawMessage,
+  type StreamCallbacks,
+} from "@/lib/api/chats";
 
 export interface CodeBlock {
   language: string;
@@ -21,143 +31,254 @@ export interface Conversation {
   updatedAt: Date;
 }
 
-const mockResponses: Record<string, { text: string; templateId: string }> = {
-  dashboard: {
-    text: "I've built an analytics dashboard with KPI metric cards, a bar chart visualization, and a sidebar navigation. The dashboard includes revenue, users, orders, and conversion rate metrics with trend indicators.",
-    templateId: "dashboard",
-  },
-  blog: {
-    text: "Here's a modern blog layout with a clean hero section, article cards in a responsive grid, and beautiful gradient thumbnails. The design emphasizes readability and visual hierarchy.",
-    templateId: "blog",
-  },
-  ecommerce: {
-    text: "I've created an e-commerce storefront with a product grid, category navigation, a promotional banner, and product cards with pricing. The design is clean and conversion-focused.",
-    templateId: "ecommerce",
-  },
-  store: {
-    text: "I've created an e-commerce storefront with a product grid, category navigation, a promotional banner, and product cards with pricing. The design is clean and conversion-focused.",
-    templateId: "ecommerce",
-  },
-  portfolio: {
-    text: "Here's an elegant portfolio website with a bold hero introduction, a selected works grid with hover overlays, and a minimalist aesthetic perfect for showcasing creative work.",
-    templateId: "portfolio",
-  },
-  landing: {
-    text: "I've built a high-converting SaaS landing page with a hero section, feature grid, three-tier pricing table, and clear CTAs. The design follows modern SaaS best practices.",
-    templateId: "landing",
-  },
-  saas: {
-    text: "Here's a SaaS application interface with sidebar navigation, a project listing table with status badges, and action buttons. It's a solid foundation for any web application.",
-    templateId: "saas-app",
-  },
-  app: {
-    text: "Here's a SaaS application interface with sidebar navigation, a project listing table with status badges, and action buttons. It's a solid foundation for any web application.",
-    templateId: "saas-app",
-  },
-};
-
-const defaultResponse = {
-  text: "I've generated a clean SaaS landing page based on your description. It includes a navigation bar, hero section with CTA, feature grid, and a pricing section. You can preview it on the right and customize further.",
-  templateId: "landing",
-};
-
-const mockConversations: Conversation[] = [
-  { id: "1", title: "Dashboard with charts", updatedAt: new Date(Date.now() - 1000 * 60 * 30) },
-  { id: "2", title: "Blog redesign", updatedAt: new Date(Date.now() - 1000 * 60 * 60 * 2) },
-  { id: "3", title: "E-commerce store", updatedAt: new Date(Date.now() - 1000 * 60 * 60 * 24) },
-  { id: "4", title: "Portfolio website", updatedAt: new Date(Date.now() - 1000 * 60 * 60 * 48) },
-];
+/** Map backend message types to frontend ChatMessage[] */
+function rawToMessages(raw: RawMessage[]): ChatMessage[] {
+  return raw
+    .filter((m) => m.type !== "SystemMessage")
+    .map((m, i) => ({
+      id: `hist-${i}`,
+      role: (m.type === "HumanMessage" ? "user" : "assistant") as
+        | "user"
+        | "assistant",
+      content: m.content,
+      timestamp: new Date(),
+    }));
+}
 
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [previewHtml, setPreviewHtml] = useState("");
-  const [conversations] = useState<Conversation[]>(mockConversations);
-  const [activeConversation, setActiveConversation] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversation, setActiveConversationRaw] = useState<
+    string | null
+  >(null);
+
+  const abortRef = useRef<AbortController | null>(null);
   const idCounter = useRef(0);
+  // Guard: skip loadMessages when sendMessage just created a new chat
+  const skipNextLoadRef = useRef(false);
 
   const genId = () => {
     idCounter.current += 1;
     return `msg-${idCounter.current}-${Date.now()}`;
   };
 
-  const sendMessage = useCallback((text: string) => {
-    const userMsg: ChatMessage = {
-      id: genId(),
-      role: "user",
-      content: text,
-      timestamp: new Date(),
-    };
+  // ---- Load conversation list ----
 
-    setMessages((prev) => [...prev, userMsg]);
-    setIsLoading(true);
-
-    // simulate AI response
-    setTimeout(() => {
-      const lowerText = text.toLowerCase();
-      let matched = defaultResponse;
-
-      for (const [keyword, response] of Object.entries(mockResponses)) {
-        if (lowerText.includes(keyword)) {
-          matched = response;
-          break;
-        }
-      }
-
-      const template = templates.find((t) => t.id === matched.templateId);
-      const html = template?.previewHtml ?? "";
-
-      const assistantMsg: ChatMessage = {
-        id: genId(),
-        role: "assistant",
-        content: matched.text,
-        previewHtml: html,
-        codeBlocks: [
-          {
-            language: "html",
-            code: html.slice(0, 600) + "\n  <!-- ... more code ... -->",
-          },
-        ],
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, assistantMsg]);
-      setPreviewHtml(html);
-      setIsLoading(false);
-    }, 1500 + Math.random() * 1000);
-  }, []);
-
-  const selectTemplate = useCallback((templateId: string) => {
-    const template = templates.find((t) => t.id === templateId);
-    if (template) {
-      setPreviewHtml(template.previewHtml);
-
-      const msg: ChatMessage = {
-        id: genId(),
-        role: "assistant",
-        content: `Loaded the "${template.name}" template. You can preview it on the right. Feel free to ask me to customize any part of it.`,
-        previewHtml: template.previewHtml,
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, msg]);
+  const loadConversations = useCallback(async () => {
+    try {
+      const chatIds = await listChats();
+      const convos: Conversation[] = await Promise.all(
+        chatIds.map(async (id) => {
+          try {
+            const meta = await getChatMetadata(id);
+            return { id, title: meta.name, updatedAt: new Date() };
+          } catch {
+            return {
+              id,
+              title: `Chat ${id.slice(0, 8)}`,
+              updatedAt: new Date(),
+            };
+          }
+        }),
+      );
+      setConversations(convos);
+    } catch (err) {
+      console.error("Failed to load conversations:", err);
     }
   }, []);
 
-  const clearMessages = useCallback(() => {
-    setMessages([]);
-    setPreviewHtml("");
+  // ---- Load messages for a conversation ----
+
+  const loadMessages = useCallback(async (chatId: string) => {
+    try {
+      const raw = await getChatMessages(chatId);
+      setMessages(rawToMessages(raw));
+    } catch (err) {
+      console.error("Failed to load messages:", err);
+      setMessages([]);
+    }
   }, []);
+
+  // Load conversations on mount
+  useEffect(() => {
+    loadConversations();
+  }, [loadConversations]);
+
+  // Load messages when active conversation changes
+  useEffect(() => {
+    if (activeConversation) {
+      if (skipNextLoadRef.current) {
+        skipNextLoadRef.current = false;
+        return;
+      }
+      loadMessages(activeConversation);
+    }
+  }, [activeConversation, loadMessages]);
+
+  // ---- Select a conversation ----
+
+  const selectConversation = useCallback(
+    (id: string) => {
+      if (id === activeConversation) return;
+      // Cancel any ongoing stream
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      setIsLoading(false);
+      setActiveConversationRaw(id);
+    },
+    [activeConversation],
+  );
+
+  // ---- New chat (clear state) ----
+
+  const newChat = useCallback(() => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    setActiveConversationRaw(null);
+    setMessages([]);
+    setIsLoading(false);
+  }, []);
+
+  // ---- Send a message with SSE streaming ----
+
+  const sendMessage = useCallback(
+    async (text: string) => {
+      let chatId = activeConversation;
+
+      // Create a new chat if none is active
+      if (!chatId) {
+        try {
+          const result = await createChat();
+          chatId = result.chat_id;
+          skipNextLoadRef.current = true;
+          setActiveConversationRaw(chatId);
+          setConversations((prev) => [
+            {
+              id: chatId!,
+              title: text.slice(0, 40),
+              updatedAt: new Date(),
+            },
+            ...prev,
+          ]);
+        } catch (err) {
+          console.error("Failed to create chat:", err);
+          return;
+        }
+      }
+
+      // Add user message
+      const userMsg: ChatMessage = {
+        id: genId(),
+        role: "user",
+        content: text,
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+      setIsLoading(true);
+
+      // Add assistant placeholder for streaming
+      const assistantId = genId();
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: assistantId,
+          role: "assistant",
+          content: "",
+          timestamp: new Date(),
+        },
+      ]);
+
+      const callbacks: StreamCallbacks = {
+        onToken: (token) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId ? { ...m, content: m.content + token } : m,
+            ),
+          );
+        },
+        onNodeStart: (node) => {
+          console.debug("Agent node started:", node);
+        },
+        onStopped: (message) => {
+          console.debug("Generation stopped:", message);
+        },
+        onError: (message) => {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantId
+                ? { ...m, content: m.content || `Error: ${message}` }
+                : m,
+            ),
+          );
+        },
+        onDone: () => {
+          setIsLoading(false);
+          abortRef.current = null;
+          // Refresh conversation list (backend may have updated the title)
+          loadConversations();
+        },
+      };
+
+      abortRef.current = streamCompletion(chatId, text, callbacks);
+    },
+    [activeConversation, loadConversations],
+  );
+
+  // ---- Stop generation ----
+
+  const stopCurrentGeneration = useCallback(async () => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
+    if (activeConversation) {
+      try {
+        await stopGeneration(activeConversation);
+      } catch {
+        // best-effort
+      }
+    }
+    setIsLoading(false);
+  }, [activeConversation]);
+
+  // ---- Delete a conversation ----
+
+  const deleteConversation = useCallback(
+    async (id: string) => {
+      try {
+        await deleteChat(id);
+        setConversations((prev) => prev.filter((c) => c.id !== id));
+        if (activeConversation === id) {
+          setActiveConversationRaw(null);
+          setMessages([]);
+        }
+      } catch (err) {
+        console.error("Failed to delete chat:", err);
+      }
+    },
+    [activeConversation],
+  );
 
   return {
     messages,
     isLoading,
-    previewHtml,
     conversations,
     activeConversation,
-    setActiveConversation,
+    setActiveConversation: selectConversation,
     sendMessage,
-    selectTemplate,
-    setPreviewHtml,
-    clearMessages,
+    stopGeneration: stopCurrentGeneration,
+    newChat,
+    deleteConversation,
+    // Backward-compatible aliases (used by ChatPage)
+    clearMessages: newChat,
+    // Stubs for template/preview features (removed — was mock-only)
+    previewHtml: "",
+    selectTemplate: (_id: string) => {},
+    setPreviewHtml: (_html: string) => {},
   };
 }

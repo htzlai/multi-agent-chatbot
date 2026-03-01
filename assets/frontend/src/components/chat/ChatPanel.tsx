@@ -1,6 +1,6 @@
 import { useRef, useEffect } from "react";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Sparkles, MessageSquare, LayoutDashboard, FileText, ShoppingBag } from "lucide-react";
+import { Sparkles, MessageSquare, Search, BookOpen, HelpCircle } from "lucide-react";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import type { ChatMessage as ChatMessageType } from "@/hooks/use-chat";
@@ -9,20 +9,20 @@ interface ChatPanelProps {
   messages: ChatMessageType[];
   isLoading: boolean;
   onSend: (text: string) => void;
-  onOpenTemplates: () => void;
+  onStop?: () => void;
 }
 
 const suggestions = [
-  { text: "Build a dashboard with charts", icon: LayoutDashboard },
-  { text: "Create a modern blog", icon: FileText },
-  { text: "Design an e-commerce store", icon: ShoppingBag },
+  { text: "What topics are covered in the knowledge base?", icon: Search },
+  { text: "Summarize the key points about this project", icon: BookOpen },
+  { text: "How does the RAG pipeline work?", icon: HelpCircle },
 ];
 
 export default function ChatPanel({
   messages,
   isLoading,
   onSend,
-  onOpenTemplates,
+  onStop,
 }: ChatPanelProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -35,7 +35,7 @@ export default function ChatPanel({
   return (
     <div className="flex h-full flex-col">
       <ScrollArea className="flex-1">
-        <div className="p-4">
+        <div className="mx-auto max-w-3xl p-4">
           {isEmpty ? (
             /* Empty state */
             <div className="flex h-full min-h-[60vh] flex-col items-center justify-center">
@@ -43,10 +43,10 @@ export default function ChatPanel({
                 <Sparkles className="h-6 w-6 text-foreground" />
               </div>
               <h3 className="mt-4 text-lg font-semibold text-foreground">
-                What do you want to build?
+                How can I help you?
               </h3>
               <p className="mt-1 text-center text-sm text-muted-foreground">
-                Describe your idea or pick a suggestion below.
+                Ask a question or pick a suggestion below.
               </p>
 
               <div className="mt-6 flex flex-col gap-2">
@@ -91,7 +91,7 @@ export default function ChatPanel({
         </div>
       </ScrollArea>
 
-      <ChatInput onSend={onSend} onOpenTemplates={onOpenTemplates} disabled={isLoading} />
+      <ChatInput onSend={onSend} onStop={onStop} isLoading={isLoading} />
     </div>
   );
 }

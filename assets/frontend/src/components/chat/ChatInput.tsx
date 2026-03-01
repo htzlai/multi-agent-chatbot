@@ -1,14 +1,14 @@
 import { useState, useRef, useEffect } from "react";
-import { ArrowUp, Plus, LayoutGrid } from "lucide-react";
+import { ArrowUp, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface ChatInputProps {
   onSend: (text: string) => void;
-  onOpenTemplates: () => void;
-  disabled?: boolean;
+  onStop?: () => void;
+  isLoading?: boolean;
 }
 
-export default function ChatInput({ onSend, onOpenTemplates, disabled }: ChatInputProps) {
+export default function ChatInput({ onSend, onStop, isLoading }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -22,7 +22,7 @@ export default function ChatInput({ onSend, onOpenTemplates, disabled }: ChatInp
 
   const handleSend = () => {
     const trimmed = value.trim();
-    if (!trimmed || disabled) return;
+    if (!trimmed || isLoading) return;
     onSend(trimmed);
     setValue("");
   };
@@ -36,41 +36,37 @@ export default function ChatInput({ onSend, onOpenTemplates, disabled }: ChatInp
 
   return (
     <div className="border-t border-border bg-background px-3 pb-3 pt-2">
-      <div className="rounded-xl border border-border bg-background shadow-card">
+      <div className="mx-auto max-w-3xl rounded-xl border border-border bg-background shadow-card">
         <textarea
           ref={textareaRef}
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Describe what you want to build..."
+          placeholder="Ask a question..."
           rows={1}
-          disabled={disabled}
+          disabled={isLoading}
           className="w-full resize-none bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none disabled:opacity-50"
         />
-        <div className="flex items-center justify-between px-2 pb-2">
-          <div className="flex items-center gap-0.5">
-            <Button variant="ghost" size="icon-sm" className="text-muted-foreground" disabled={disabled}>
-              <Plus className="h-4 w-4" />
-            </Button>
+        <div className="flex items-center justify-end px-2 pb-2">
+          {isLoading ? (
             <Button
-              variant="ghost"
-              size="sm"
-              className="gap-1.5 text-xs text-muted-foreground"
-              onClick={onOpenTemplates}
-              disabled={disabled}
+              size="icon-sm"
+              variant="outline"
+              className="rounded-lg"
+              onClick={onStop}
             >
-              <LayoutGrid className="h-3.5 w-3.5" />
-              Templates
+              <Square className="h-3.5 w-3.5" />
             </Button>
-          </div>
-          <Button
-            size="icon-sm"
-            className="rounded-lg"
-            onClick={handleSend}
-            disabled={disabled || !value.trim()}
-          >
-            <ArrowUp className="h-4 w-4" />
-          </Button>
+          ) : (
+            <Button
+              size="icon-sm"
+              className="rounded-lg"
+              onClick={handleSend}
+              disabled={!value.trim()}
+            >
+              <ArrowUp className="h-4 w-4" />
+            </Button>
+          )}
         </div>
       </div>
     </div>
