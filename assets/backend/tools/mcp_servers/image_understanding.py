@@ -21,46 +21,38 @@ MCP server providing image understanding and analysis tools.
 This server exposes a `process_image` tool that uses a vision language model to answer queries about images. 
 It supports multiple image input formats including URLs, file paths, and base64-encoded images.
 """
-import asyncio
 import base64
 import os
-import requests
 import sys
+from functools import lru_cache
 from pathlib import Path
-import time
 
-from langchain_core.tools import tool, Tool
-from langchain_mcp_adapters.tools import to_fastmcp
 from mcp.server.fastmcp import FastMCP
-from openai import AsyncOpenAI, OpenAI
+from openai import OpenAI
 
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
-from postgres_storage import PostgreSQLConversationStorage
 
 
 mcp = FastMCP("image-understanding-server")
 
+# --- Configuration from environment ---
+VLM_MODEL_NAME = os.getenv("VLM_MODEL_NAME", "")
+VLM_BASE_URL = os.getenv("VLM_BASE_URL", "")
+VLM_API_KEY = os.getenv("VLM_API_KEY", "api_key")
 
-model_name = "Qwen2.5-VL-7B-Instruct"
-model_client = OpenAI(
-    base_url=f"http://qwen2.5-vl:8000/v1",
-    api_key="api_key"
-)
-POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = int(os.getenv("POSTGRES_PORT", 5432))
-POSTGRES_DB = os.getenv("POSTGRES_DB", "chatbot")
-POSTGRES_USER = os.getenv("POSTGRES_USER", "chatbot_user")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "chatbot_password")
 
-postgres_storage = PostgreSQLConversationStorage(
-    host=POSTGRES_HOST,
-    port=POSTGRES_PORT,
-    database=POSTGRES_DB,
-    user=POSTGRES_USER,
-    password=POSTGRES_PASSWORD,
-    cache_ttl=21600  # 6小时
-)
+def _is_vlm_configured() -> bool:
+    """Check if VLM service is configured."""
+    return bool(VLM_BASE_URL and VLM_MODEL_NAME)
+
+
+@lru_cache()
+def get_model_client() -> OpenAI | None:
+    """Singleton OpenAI client for VLM model. Returns None if not configured."""
+    if not _is_vlm_configured():
+        return None
+    return OpenAI(base_url=VLM_BASE_URL, api_key=VLM_API_KEY)
 
 @mcp.tool()
 def explain_image(query: str, image: str):
@@ -106,10 +98,18 @@ def explain_image(query: str, image: str):
         }
     ]
     
+    client = get_model_client()
+    if client is None:
+        return (
+            "[Image analysis unavailable] "
+            "Vision language model is not configured. "
+            "Set VLM_BASE_URL and VLM_MODEL_NAME environment variables to enable image understanding."
+        )
+
     try:
         print(f"Sending request to vision model: {query}")
-        response = model_client.chat.completions.create(
-            model=model_name,
+        response = client.chat.completions.create(
+            model=VLM_MODEL_NAME,
             messages=message,
             max_tokens=512,
             temperature=0.1
@@ -118,7 +118,11 @@ def explain_image(query: str, image: str):
         return response.choices[0].message.content
     except Exception as e:
         print(f"Error calling vision model: {e}")
-        raise RuntimeError(f"Failed to process image with vision model: {e}")
+        return (
+            f"[Image analysis failed] "
+            f"Could not reach vision model at {VLM_BASE_URL}: {e}. "
+            f"The model service may be unavailable."
+        )
 
 if __name__ == "__main__":
     print(f'running {mcp.name} MCP server')

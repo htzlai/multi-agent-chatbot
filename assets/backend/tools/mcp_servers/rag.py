@@ -46,7 +46,7 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root))
 
 from config import ConfigManager
-from vector_store import VectorStore, create_vector_store_with_config
+from services.vector_store_service import VectorStore, create_vector_store_with_config
 
 
 logging.basicConfig(

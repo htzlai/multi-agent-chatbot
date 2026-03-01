@@ -28,101 +28,207 @@ curl http://localhost:8000/health
 
 ## Current State
 
-- `main.py`: ~2279 lines, 45+ route endpoints — all flat, no router split yet
-- 5 global variables: `agent`, `postgres_storage`, `vector_store`, `active_connections`, `connection_tasks`
-- No `routers/`, `services/`, `infrastructure/`, or `dependencies/` directories exist yet
-- `enhanced_rag.py` has direct `pymilvus` imports (needs encapsulation)
+Backend refactoring is **complete** (Phases 1-6). `main.py` reduced from 2279 to 230 lines. `enhanced_rag.py` (1381 lines) deleted — replaced by `rag/` package. `agent.py` (785 lines) decomposed into `agent/` package. All legacy routers consolidated into `api_v1.py`. `vector_store.py` migrated to `services/vector_store_service.py`.
+
+- `main.py`: 230 lines — app factory, lifespan, middleware, exception handlers, router registration
+- `routers/`: 4 files, 962 lines — thin HTTP handlers with `Depends()` injection, delegates to services
+- `services/`: 7 files, 1502 lines — stateless business logic (chat, health, ingest, knowledge, rag, vector_store)
+- `rag/`: 6 files, 978 lines — decomposed RAG pipeline
+- `infrastructure/`: 5 files, 547 lines — milvus_client, embedding_client, llm_client, cache
+- `dependencies/`: 2 files, 72 lines — FastAPI `Depends()` factories
+- `agent/`: 6 files, 786 lines — LangGraph ChatAgent with MCP tool integration (decomposed from monolithic `agent.py`)
+- Global variables eliminated from `main.py` — uses `app.state` + `@lru_cache` singletons
 
 ## Architecture — Module Dependency Graph
 
 ```
-main.py ──→ agent.py ──→ client.py (MCPClient)
-  │            │            └──→ tools/mcp_servers/*.py
-  │            ├──→ prompts.py
-  │            ├──→ postgres_storage.py ──→ asyncpg
-  │            └──→ langfuse_client.py
+main.py ──→ routers/ (api_v1, chat_stream, health)
+  │              │
+  │              ├──→ dependencies/providers.py ──→ singletons
+  │              │
+  │              ├──→ services/ (chat, health, ingest, knowledge, rag, vector_store)
+  │              │       └──→ infrastructure/ (milvus_client, embedding_client, llm_client, cache)
+  │              │
+  │              └──→ rag/ (pipeline, bm25, reranker, hyde, fusion)
+  │                      └──→ infrastructure/
+  │
+  ├──→ agent/ (core, graph, streaming, formatting, observability)
+  │       │──→ client.py (MCPClient)
+  │       │       └──→ tools/mcp_servers/*.py
+  │       ├──→ prompts.py
+  │       ├──→ postgres_storage.py ──→ asyncpg
+  │       └──→ observability.py ──→ langfuse (v2)
   │
   ├──→ config.py (ConfigManager)
   ├──→ models.py (Pydantic request models)
-  ├──→ vector_store.py ──→ langchain_milvus, langchain_openai
-  ├──→ postgres_storage.py
-  ├──→ utils.py
   ├──→ errors.py
-  ├──→ auth.py (optional JWT via SUPABASE_JWT_SECRET)
-  └──→ openai_compatible/router.py ──→ openai_compatible/models.py
+  ├──→ auth.py (optional JWT)
+  └──→ openai_compatible/router.py
 ```
 
-`enhanced_rag.py` is standalone — called from `tools/mcp_servers/rag.py`, not from `main.py` directly.
+**Call chain**: `Router → Service → Infrastructure → External API`
 
 ## Key Files
 
 | File | Lines | Role |
 |------|-------|------|
-| `main.py` | ~2279 | All 45+ endpoints (needs splitting) |
-| `agent.py` | ~791 | LangGraph ChatAgent with MCP tool integration |
-| `enhanced_rag.py` | ~1381 | Hybrid search: Milvus vector + BM25 + reranking |
-| `vector_store.py` | ~807 | LangChain-based Milvus wrapper |
-| `postgres_storage.py` | ~571 | Chat history + image storage via asyncpg |
-| `config.py` | ~165 | Thread-safe config with file-change detection |
-| `errors.py` | ~254 | Unified error response system |
-| `auth.py` | ~119 | Optional JWT middleware |
-| `client.py` | ~92 | MCP client for tool discovery |
+| `main.py` | 230 | App factory + lifespan + router mount |
+| **Agent package** | | |
+| `agent/__init__.py` | 14 | Re-exports ChatAgent |
+| `agent/core.py` | 280 | ChatAgent class: create(), query() |
+| `agent/graph.py` | 250 | LangGraph StateGraph: build_graph(), tool_node(), generate() |
+| `agent/streaming.py` | 127 | SSE streaming: _stream_response(), _queue_writer() |
+| `agent/formatting.py` | 59 | Message format conversion (LangGraph ↔ OpenAI) |
+| `agent/observability.py` | 56 | Langfuse v2 tracing integration |
+| **Routers** | | |
+| `routers/api_v1.py` | 719 | All `/api/v1/` endpoints (chats, sources, RAG, upload, knowledge, admin) |
+| `routers/chat_stream.py` | 164 | SSE streaming: `/api/v1/chats/{id}/completions` |
+| `routers/health.py` | 62 | Health checks, metrics, debug |
+| **Services** | | |
+| `services/vector_store_service.py` | 584 | VectorStore class (Milvus + langchain_milvus) |
+| `services/knowledge_service.py` | 423 | 3-layer reconciliation (config+files+vectors) |
+| `services/ingest_service.py` | 182 | Document loading, chunking, indexing |
+| `services/health_service.py` | 156 | Aggregate health checks, metrics |
+| `services/chat_service.py` | 83 | Chat CRUD, dedup'd from 3 routers |
+| `services/rag_service.py` | 54 | Thin wrapper for RAG pipeline calls |
+| **RAG pipeline** | | |
+| `rag/pipeline.py` | 412 | RAG orchestrator: cache → HyDE → search → fuse → rerank → answer |
+| `rag/bm25.py` | 208 | BM25Indexer using infrastructure.milvus_client |
+| `rag/reranker.py` | 163 | Async LLM-based cross-encoder reranker |
+| `rag/hyde.py` | 91 | Async HyDE query expansion |
+| `rag/fusion.py` | 74 | Reciprocal Rank Fusion (pure function) |
+| **Infrastructure** | | |
+| `infrastructure/cache.py` | 253 | QueryCache (memory) + RedisQueryCache |
+| `infrastructure/milvus_client.py` | 150 | Centralized pymilvus access (10 functions) |
+| `infrastructure/embedding_client.py` | 65 | AsyncQwen3Embedding (async httpx) |
+| `infrastructure/llm_client.py` | 33 | AsyncOpenAI singleton |
+| `dependencies/providers.py` | 54 | FastAPI Depends() factories |
 
-## Route Map (all in main.py)
+## Route Map
+
+All routes under `/api/v1/` prefix except health (root) and OpenAI-compat (`/v1/`).
 
 ```
-Health:     GET /health, /health/rag, /metrics, /debug/config
-            POST /debug/rebuild-bm25
-WebSocket:  WS /ws/chat/{chat_id}
-Upload:     POST /upload-image, /ingest
-            GET /ingest/status/{task_id}
-Sources:    GET/POST /sources, /sources/vector-counts, /sources/reindex
-            DELETE /sources/{source_name}
-Knowledge:  GET/POST /knowledge/status, /knowledge/sync
-            DELETE /knowledge/sources/{source_name}
-Config:     GET/POST /selected_sources, /selected_model
-            GET /available_models
-Chats:      GET /chats, /chat_id, /chat/{chat_id}/metadata
-            POST /chat_id, /chat/rename, /chat/new
-            DELETE /chat/{chat_id}, /chats/clear
-Collections: DELETE /collections/{name}, /collections
-RAG:        GET /test/rag, /test/vector-stats
-            GET/POST /rag/llamaindex/config, /rag/llamaindex/query, /rag/llamaindex/stats
-            POST /rag/llamaindex/cache/clear
-            GET /rag/llamaindex/cache/stats
-Admin:      GET /admin/rag/stats, /admin/rag/sources, /admin/conversations
-            POST /admin/rag/sources/select, /admin/rag/sources/select-all, /admin/rag/sources/deselect-all
-            GET /admin/conversations/{chat_id}/messages
-OpenAI:     (mounted) /v1/chat/completions, /v1/models, /v1/embeddings
+routers/health.py (no prefix):
+  GET  /health                          Health check
+  GET  /health/rag                      RAG health check
+  GET  /metrics                         System metrics
+  GET  /debug/config                    Debug config info
+  POST /debug/rebuild-bm25             Rebuild BM25 index
+
+routers/chat_stream.py (prefix: /api/v1):
+  POST /api/v1/chats/{chat_id}/completions   SSE streaming chat
+  POST /api/v1/chats/{chat_id}/stop          Stop generation
+
+routers/api_v1.py (prefix: /api/v1):
+  # RAG
+  POST /api/v1/rag/query               RAG search query
+  GET  /api/v1/rag/stats               RAG statistics
+  GET  /api/v1/rag/config              RAG configuration
+  POST /api/v1/rag/cache/clear         Clear RAG cache
+  GET  /api/v1/rag/cache/stats         Cache statistics
+
+  # Models
+  GET  /api/v1/models/selected          Current model
+  POST /api/v1/models/selected          Set model
+  GET  /api/v1/models/available         Available models
+
+  # Chats
+  GET  /api/v1/chats                    List chats
+  POST /api/v1/chats                    Create chat
+  GET  /api/v1/chats/current            Get current chat
+  PATCH /api/v1/chats/current           Update current chat
+  GET  /api/v1/chats/{id}/messages      Chat messages
+  GET  /api/v1/chats/{id}/metadata      Chat metadata
+  PATCH /api/v1/chats/{id}/metadata     Update metadata
+  DELETE /api/v1/chats/{id}             Delete chat
+  DELETE /api/v1/chats                  Clear all chats
+
+  # Sources
+  GET  /api/v1/sources                  List sources
+  GET  /api/v1/sources/vector-counts    Vector counts per source
+  POST /api/v1/sources/reindex          Reindex source
+  DELETE /api/v1/sources/{name}         Delete source
+  GET  /api/v1/selected-sources         Selected sources
+  POST /api/v1/selected-sources         Set selected sources
+
+  # Upload & Ingest
+  POST /api/v1/upload/image             Upload image
+  POST /api/v1/ingest                   Ingest documents
+  GET  /api/v1/ingest/status/{task_id}  Ingestion status
+
+  # Knowledge
+  GET  /api/v1/knowledge/status         Knowledge sync status
+  POST /api/v1/knowledge/sync           Trigger sync
+  DELETE /api/v1/knowledge/sources/{name}  Delete knowledge source
+
+  # Admin
+  DELETE /api/v1/admin/collections/{name}  Delete collection
+  DELETE /api/v1/admin/collections         Delete all collections
+  GET  /api/v1/admin/test/rag              Test RAG query
+  GET  /api/v1/admin/test/vector-stats     Vector statistics
+  GET  /api/v1/admin/rag/stats             RAG stats (admin)
+  GET  /api/v1/admin/rag/sources           List RAG sources
+  POST /api/v1/admin/rag/sources/select    Select source
+  POST /api/v1/admin/rag/sources/select-all   Select all
+  POST /api/v1/admin/rag/sources/deselect-all Deselect all
+  GET  /api/v1/admin/conversations         List conversations
+  GET  /api/v1/admin/conversations/{id}/messages  Conversation messages
+
+openai_compatible/router.py (prefix: /v1):
+  GET  /v1/models                       List models
+  GET  /v1/models/{model_id}            Get model
+  POST /v1/chat/completions             Chat completion
+  POST /v1/embeddings                   Generate embeddings
 ```
 
-## enhanced_rag.py — Hybrid Search Pipeline
+## RAG Pipeline (`rag/` package)
 
-This is the most complex module. It implements a multi-stage retrieval pipeline:
+Multi-stage retrieval pipeline, fully async:
 
-1. Query expansion via HyDE (Hypothetical Document Embeddings) using the LLM
-2. Parallel search: Milvus vector search + BM25 keyword search
-3. Reciprocal Rank Fusion to merge results
-4. LLM-based reranking (Reranker class)
-5. QueryCache (in-memory or Redis) for deduplication
+1. Cache check (Redis + memory) — `infrastructure/cache.py`
+2. HyDE query expansion (optional) — `rag/hyde.py`
+3. Parallel search via `asyncio.gather()` — `rag/pipeline.py`
+   - Vector search: Milvus + Qwen3 embeddings — `rag/pipeline.py:vector_search()`
+   - BM25 keyword search — `rag/bm25.py`
+4. Reciprocal Rank Fusion — `rag/fusion.py`
+5. Cross-encoder reranking — `rag/reranker.py`
+6. LLM answer generation — `rag/pipeline.py:generate_answer()`
+7. Cache store
 
-Key classes: `Qwen3Embedding`, `BM25Indexer`, `Reranker`, `HyDEQueryExpander`, `QueryCache`, `RedisQueryCache`
-
-Entry point: `async enhanced_rag_query(query, sources, ...)` — returns ranked documents + answer.
+Entry point: `from rag import enhanced_rag_query`
 
 ## Non-Obvious Patterns
 
 ### ChatAgent Lifecycle
 - Created via `await ChatAgent.create(...)` (async factory) — never `ChatAgent(...)`
 - Uses LangGraph `StateGraph` with `MemorySaver` — conversation state is in-memory per session
-- `SENTINEL = object()` marks end of streaming — check for it in WebSocket handlers
+- `SENTINEL = object()` marks end of streaming — check for it in SSE handlers
 - MCP tools auto-discovered at startup via `client.py`
+- Agent decomposed into mixins: `ChatAgent(_GraphMixin, _StreamingMixin)`
 
-### Global State (to be refactored)
-- `agent` is initialized in `lifespan()` context manager, set via `global agent`
-- `postgres_storage` and `vector_store` are module-level singletons
-- `active_connections: Dict[str, Set[WebSocket]]` — multiple WS connections per chat_id
-- `connection_tasks: Dict[str, asyncio.Task]` — one processing task per chat_id
+### Dependency Injection
+- `dependencies/providers.py`: `@lru_cache()` singletons for ConfigManager, PostgresStorage
+- `agent` + `vector_store` stored on `app.state` (async-initialized in lifespan)
+- Routers use `Depends(get_config_manager)`, `Depends(get_postgres_storage)`, etc.
+
+### Infrastructure Layer
+- **All** `pymilvus` access goes through `infrastructure/milvus_client.py` (R2 compliant)
+- Embedding: `AsyncQwen3Embedding` uses async `httpx` (was sync `requests`)
+- LLM: `get_llm_client()` returns shared `AsyncOpenAI` singleton (was per-call creation)
+- Cache key includes `query + sources + top_k + use_hybrid` for correctness
+
+### VectorStore (services/vector_store_service.py)
+- Uses `langchain_milvus.Milvus` which requires sync `embed_documents()`/`embed_query()` interface
+- `CustomEmbeddings` class provides sync embedding via `requests.post()` + `ThreadPoolExecutor`
+- NOT interchangeable with `AsyncQwen3Embedding` (different interface: sync vs async)
+- `vector_store.py` at project root is a backward-compatible re-export shim (17 lines)
+
+### Service Layer
+- Stateless module-level async functions — no classes (except VectorStore)
+- Accept dependencies as parameters (no global state)
+- Return raw data — routers handle HTTP response formatting
+- Business logic dedup'd from 3+ routers into single service functions
 
 ### ConfigManager
 - `config.json` auto-created at startup from `MODELS` env var
@@ -137,39 +243,44 @@ Entry point: `async enhanced_rag_query(query, sources, ...)` — returns ranked 
 ### Logging
 - JSON-structured: `logger.info({"message": "...", "key": val})`
 - Import: `from logger import logger, log_request, log_response, log_error`
-- Writes to `app.log` in backend working directory
 
-### Rate Limiting
-- Optional via `slowapi` — gracefully degrades if not installed (`RATE_LIMIT_AVAILABLE` flag)
+## Refactoring Progress
 
-## Refactoring Phases
+### Phase 1: Foundation — dependencies/ + infrastructure/ [COMPLETE]
+- [x] `dependencies/providers.py` — FastAPI Depends() factories
+- [x] `infrastructure/milvus_client.py` — centralized pymilvus
+- [x] `infrastructure/embedding_client.py` — async Qwen3 embeddings
+- [x] `infrastructure/llm_client.py` — AsyncOpenAI singleton
+- [x] `infrastructure/cache.py` — QueryCache + RedisQueryCache
 
-### Phase 1: Split Routers (Priority Order)
-- [ ] `routers/health.py` — /health, /health/rag, /metrics
-- [ ] `routers/chats.py` — All chat CRUD
-- [ ] `routers/knowledge.py` — /knowledge/*
-- [ ] `routers/sources.py` — /sources/*
-- [ ] `routers/rag.py` — /rag/*, /test/*
-- [ ] `routers/admin.py` — /admin/*
-- [ ] `routers/config.py` — /selected_*, /available_models
-- [ ] `routers/upload.py` — /upload-image, /ingest
-- [ ] `routers/websocket.py` — /ws/chat/*
+### Phase 2: Router Split — main.py → routers/ [COMPLETE]
+- [x] 10 router files extracted from main.py (2279 → 230 lines)
 
-### Phase 2: Extract Service Layer
-- [ ] `services/chat_service.py`
-- [ ] `services/knowledge_service.py`
-- [ ] `services/rag_service.py`
-- [ ] `services/health_service.py`
+### Phase 3: RAG Pipeline Decomposition [COMPLETE]
+- [x] `enhanced_rag.py` (1381 lines) → `rag/` package (978 lines, 6 files)
 
-### Phase 3: Dependency Injection
-- [ ] `dependencies/providers.py`
+### Phase 4: Service Layer Extraction [COMPLETE]
+- [x] `services/chat_service.py` — chat CRUD, dedup'd from 3 routers
+- [x] `services/health_service.py` — aggregate health checks, metrics
+- [x] `services/ingest_service.py` — unified indexing tasks
+- [x] `services/knowledge_service.py` — 3-layer reconciliation
 
-### Phase 4: Cleanup
-- [ ] Remove all direct pymilvus imports from routers
-- [ ] Verify main.py < 500 lines
+### Phase 5: Agent Decomposition + VectorStore Migration [COMPLETE]
+- [x] `agent.py` (785 lines) → `agent/` package (786 lines, 6 files: core, graph, streaming, formatting, observability)
+- [x] `vector_store.py` (808 lines) → `services/vector_store_service.py` (584 lines) + re-export shim (17 lines)
+- [x] Deleted `utils.py`, `websocket.py`, 7 legacy routers (chats, config, sources, knowledge, upload, search)
+- [x] Error handling standardized: `errors.py` helpers replace raw `HTTPException`
+- [x] Route consolidation: all endpoints under `/api/v1/` (except health at root)
+- [x] Removed dead dependencies (5 LlamaIndex packages, websockets)
+- [x] Fixed `image_understanding.py` globals → `@lru_cache()` singleton
+
+### Phase 6: Documentation [COMPLETE]
+- [x] Updated both CLAUDE.md files with current architecture
+- [x] Corrected file counts, route map, architecture diagram
+- [x] Removed references to deleted files
 
 ## Verification Checklist (after each task)
 - [ ] `curl http://localhost:8000/health` passes
 - [ ] `pytest ../tests/ -v` passes
 - [ ] No new global variables introduced
-- [ ] main.py line count reduced
+- [ ] No direct `pymilvus` imports outside `infrastructure/milvus_client.py`

@@ -14,7 +14,9 @@ import uuid
 from typing import AsyncGenerator, Dict, List, Optional, Union
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Request
+
+from errors import APIError, ErrorCode, InternalError, NotFoundError
 from fastapi.responses import StreamingResponse
 
 from .models import (
@@ -109,7 +111,7 @@ async def get_model(model_id: str):
     for model in models_response.data:
         if model.id == model_id:
             return model
-    raise HTTPException(status_code=404, detail=f"Model '{model_id}' not found")
+    raise NotFoundError("Model", model_id)
 
 
 # ============================================================
@@ -178,14 +180,15 @@ async def non_stream_chat_completions(request: ChatCompletionRequest) -> ChatCom
                     usage=data.get("usage", UsageInfo())
                 )
             else:
-                raise HTTPException(
+                raise APIError(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=f"LLM service error: {response.text}",
                     status_code=response.status_code,
-                    detail=f"LLM service error: {response.text}"
                 )
         except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="LLM service timeout")
+            raise APIError(code=ErrorCode.INTERNAL_ERROR, message="LLM service timeout", status_code=504)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error calling LLM: {str(e)}")
+            raise InternalError(f"Error calling LLM: {str(e)}")
 
 
 async def stream_chat_completions(request: ChatCompletionRequest) -> AsyncGenerator[str, None]:
@@ -254,11 +257,12 @@ async def create_embeddings(request: EmbeddingsRequest):
                     usage=data.get("usage", UsageInfo())
                 )
             else:
-                raise HTTPException(
+                raise APIError(
+                    code=ErrorCode.INTERNAL_ERROR,
+                    message=f"Embedding service error: {response.text}",
                     status_code=response.status_code,
-                    detail=f"Embedding service error: {response.text}"
                 )
         except httpx.TimeoutException:
-            raise HTTPException(status_code=504, detail="Embedding service timeout")
+            raise APIError(code=ErrorCode.INTERNAL_ERROR, message="Embedding service timeout", status_code=504)
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Error calling embedding service: {str(e)}")
+            raise InternalError(f"Error calling embedding service: {str(e)}")

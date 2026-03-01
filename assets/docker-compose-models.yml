@@ -163,9 +163,6 @@ services:
       - "999"
       - "--jinja"
 
-volumes:
-  ollama-data:
-
 networks:
   default:
     name: chatbot-net

@@ -5,8 +5,10 @@ Verifies JWT tokens from Supabase Cloud Auth
 
 import os
 import httpx
-from fastapi import Depends, HTTPException, status, Query, WebSocket
+from fastapi import Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+from errors import APIError, UnauthorizedError
 from typing import Optional
 from functools import lru_cache
 
@@ -57,15 +59,9 @@ def verify_token(token: str) -> dict:
         )
         return payload
     except ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token has expired"
-        )
+        raise UnauthorizedError("Token has expired")
     except JWTError as e:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}"
-        )
+        raise UnauthorizedError(f"Invalid token: {str(e)}")
 
 
 async def get_current_user(
@@ -73,10 +69,7 @@ async def get_current_user(
 ) -> dict:
     """FastAPI dependency to get the current authenticated user from JWT"""
     if credentials is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated"
-        )
+        raise UnauthorizedError("Not authenticated")
     
     token = credentials.credentials
     payload = verify_token(token)
@@ -104,16 +97,5 @@ async def get_current_user_optional(
             "email": payload.get("email"),
             "role": payload.get("role", "authenticated"),
         }
-    except HTTPException:
+    except APIError:
         return None
-
-
-async def verify_websocket_token(token: str) -> dict:
-    """Verify token for WebSocket connections"""
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token required for WebSocket connection"
-        )
-    
-    return verify_token(token)

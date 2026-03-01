@@ -27,9 +27,5 @@ class ChatConfig(BaseModel):
 class ChatIdRequest(BaseModel):
     chat_id: str
 
-class ChatRenameRequest(BaseModel):
-    chat_id: str
-    new_name: str
-
 class SelectedModelRequest(BaseModel):
-    model: str      
+    model: str
