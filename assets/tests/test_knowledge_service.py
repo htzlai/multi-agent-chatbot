@@ -342,3 +342,121 @@ class TestGetSourcesWithVectorCounts:
 
         assert result["status"] == "not_initialized"
         assert result["total_vectors"] == 0
+
+
+# ── _index_missing_sources ────────────────────────────────
+
+
+class TestIndexMissingSources:
+    """Tests for _index_missing_sources (helper that indexes files with no vectors)."""
+
+    @patch("services.knowledge_service.os.path.isfile", return_value=True)
+    @patch("services.knowledge_service.os.listdir", return_value=["doc.pdf"])
+    @patch("services.knowledge_service.os.path.isdir", return_value=True)
+    def test_indexes_missing_source(self, mock_isdir, mock_listdir, mock_isfile):
+        from services.knowledge_service import _index_missing_sources
+
+        vs = MagicMock()
+        vs._load_documents.return_value = [MagicMock()]
+        vs.index_documents = MagicMock()
+
+        results = {"indexed": [], "errors": []}
+        _index_missing_sources(
+            sources={"doc.pdf"},
+            source_mapping={"doc.pdf": "task-abc"},
+            vector_store=vs,
+            results=results,
+        )
+
+        assert "doc.pdf" in results["indexed"]
+        vs.index_documents.assert_called_once()
+
+    @patch("services.knowledge_service.os.path.isfile", return_value=True)
+    @patch("services.knowledge_service.os.listdir", return_value=["doc.pdf"])
+    @patch("services.knowledge_service.os.path.isdir", return_value=True)
+    def test_load_failure_appends_error(self, mock_isdir, mock_listdir, mock_isfile):
+        from services.knowledge_service import _index_missing_sources
+
+        vs = MagicMock()
+        vs._load_documents.side_effect = Exception("corrupt file")
+
+        results = {"indexed": [], "errors": []}
+        _index_missing_sources(
+            sources={"doc.pdf"},
+            source_mapping={"doc.pdf": "task-1"},
+            vector_store=vs,
+            results=results,
+        )
+
+        assert len(results["errors"]) == 1
+        assert "doc.pdf" in results["errors"][0]
+
+    @patch("services.knowledge_service.os.path.isdir", return_value=False)
+    def test_skips_missing_task_dir(self, mock_isdir):
+        from services.knowledge_service import _index_missing_sources
+
+        vs = MagicMock()
+        results = {"indexed": [], "errors": []}
+        _index_missing_sources(
+            sources={"doc.pdf"},
+            source_mapping={"doc.pdf": "task-gone"},
+            vector_store=vs,
+            results=results,
+        )
+
+        assert results["indexed"] == []
+        assert results["errors"] == []
+
+
+# ── reindex_sources ───────────────────────────────────────
+
+
+class TestReindexSources:
+    """Tests for reindex_sources."""
+
+    @patch("services.knowledge_service._read_source_mapping")
+    def test_empty_mapping_returns_none(self, mock_mapping):
+        from services.knowledge_service import reindex_sources
+
+        mock_mapping.return_value = {}
+        result = reindex_sources(MagicMock(), MagicMock())
+        assert result is None
+
+    @patch("services.knowledge_service.get_sources_with_vector_counts")
+    @patch("services.knowledge_service._read_source_mapping")
+    def test_all_indexed_returns_noop(self, mock_mapping, mock_counts):
+        from services.knowledge_service import reindex_sources
+
+        mock_mapping.return_value = {"doc.pdf": "task-1"}
+        mock_counts.return_value = {"source_vectors": {"doc.pdf": 100}}
+
+        cm = MagicMock()
+        result = reindex_sources(cm, MagicMock())
+
+        assert result["status"] == "success"
+        assert result["reindexed"] == []
+
+    @patch("services.knowledge_service.os.path.isfile", return_value=True)
+    @patch("services.knowledge_service.os.listdir", return_value=["zero.pdf"])
+    @patch("services.knowledge_service.os.path.isdir", return_value=True)
+    @patch("services.knowledge_service.get_sources_with_vector_counts")
+    @patch("services.knowledge_service._read_source_mapping")
+    def test_reindexes_zero_vector_sources(
+        self, mock_mapping, mock_counts, mock_isdir, mock_listdir, mock_isfile
+    ):
+        from services.knowledge_service import reindex_sources
+
+        mock_mapping.return_value = {"zero.pdf": "task-2"}
+        mock_counts.return_value = {"source_vectors": {"zero.pdf": 0}}
+
+        vs = MagicMock()
+        vs._load_documents.return_value = [MagicMock()]
+        vs.index_documents = MagicMock()
+        cm = MagicMock()
+
+        with patch("builtins.open", mock_open(read_data=b"pdf bytes")):
+            result = reindex_sources(cm, vs)
+
+        assert result["status"] == "success"
+        assert "zero.pdf" in result["reindexed"]
+        vs.index_documents.assert_called_once()

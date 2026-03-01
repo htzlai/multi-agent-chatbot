@@ -413,3 +413,258 @@ class TestGenerateAnswer:
             result = await generate_answer("query", "some context")
 
         assert "some context" in result
+
+
+# ── _truncate_sources ─────────────────────────────────────
+
+
+class TestTruncateSources:
+    """Tests for rag.pipeline._truncate_sources (pure function)."""
+
+    def test_truncates_to_top_k(self):
+        from rag.pipeline import _truncate_sources
+
+        sources = [
+            {"name": f"doc{i}.pdf", "score": 1.0 - i * 0.1, "excerpt": f"text{i}"}
+            for i in range(5)
+        ]
+        result = _truncate_sources(sources, top_k=2)
+        assert len(result) == 2
+        assert result[0]["name"] == "doc0.pdf"
+        assert result[1]["name"] == "doc1.pdf"
+
+    def test_excerpt_truncated_to_500_chars(self):
+        from rag.pipeline import _truncate_sources
+
+        long_excerpt = "x" * 1000
+        sources = [{"name": "long.pdf", "score": 0.9, "excerpt": long_excerpt}]
+        result = _truncate_sources(sources, top_k=1)
+        assert len(result[0]["excerpt"]) == 500
+
+    def test_missing_optional_fields(self):
+        """vector_score and bm25_score absent → returned as None."""
+        from rag.pipeline import _truncate_sources
+
+        sources = [{"name": "a.pdf", "score": 0.8, "excerpt": "hello"}]
+        result = _truncate_sources(sources, top_k=1)
+        assert result[0]["vector_score"] is None
+        assert result[0]["bm25_score"] is None
+
+    def test_empty_excerpt_returns_empty_string(self):
+        from rag.pipeline import _truncate_sources
+
+        sources = [{"name": "a.pdf", "score": 0.5, "excerpt": ""}]
+        result = _truncate_sources(sources, top_k=1)
+        assert result[0]["excerpt"] == ""
+
+    def test_none_excerpt_returns_empty_string(self):
+        from rag.pipeline import _truncate_sources
+
+        sources = [{"name": "a.pdf", "score": 0.5}]
+        result = _truncate_sources(sources, top_k=1)
+        assert result[0]["excerpt"] == ""
+
+    def test_empty_sources_returns_empty(self):
+        from rag.pipeline import _truncate_sources
+
+        assert _truncate_sources([], top_k=5) == []
+
+
+# ── bm25_query ────────────────────────────────────────────
+
+
+class TestBm25Query:
+    """Tests for rag.bm25.bm25_query (module-level wrapper)."""
+
+    def _make_indexer(self, documents):
+        """Create a pre-populated BM25Indexer."""
+        from rag.bm25 import BM25Indexer
+
+        indexer = BM25Indexer()
+        indexer.documents = documents
+        indexer.doc_ids = [str(i) for i in range(len(documents))]
+        indexer.tokenized_corpus = [
+            indexer._tokenize(d["text"]) for d in documents
+        ]
+        indexer._doc_len = [len(t) for t in indexer.tokenized_corpus]
+        indexer._avgdl = (
+            sum(indexer._doc_len) / len(indexer._doc_len)
+            if indexer._doc_len
+            else 0
+        )
+        indexer._initialized = True
+        return indexer
+
+    @patch("rag.bm25.get_bm25_indexer")
+    def test_source_filtering(self, mock_get):
+        from rag.bm25 import bm25_query
+
+        docs = [
+            {"text": "machine learning intro", "source": "ml.pdf"},
+            {"text": "machine learning advanced", "source": "ml2.pdf"},
+            {"text": "cooking recipe", "source": "cook.pdf"},
+        ]
+        mock_get.return_value = self._make_indexer(docs)
+
+        result = bm25_query("machine learning", top_k=5, sources=["ml.pdf"])
+        source_names = [s["name"] for s in result["sources"]]
+        assert "ml.pdf" in source_names
+        assert "ml2.pdf" not in source_names
+        assert "cook.pdf" not in source_names
+
+    @patch("rag.bm25.get_bm25_indexer")
+    def test_deduplication(self, mock_get):
+        """Each source name appears at most once."""
+        from rag.bm25 import bm25_query
+
+        docs = [
+            {"text": "page one content", "source": "same.pdf"},
+            {"text": "page two content", "source": "same.pdf"},
+        ]
+        mock_get.return_value = self._make_indexer(docs)
+
+        result = bm25_query("page content", top_k=10)
+        assert result["num_sources"] == 1
+
+    @patch("rag.bm25.get_bm25_indexer")
+    def test_top_k_limit(self, mock_get):
+        from rag.bm25 import bm25_query
+
+        docs = [
+            {"text": f"topic{i} words", "source": f"doc{i}.pdf"}
+            for i in range(10)
+        ]
+        mock_get.return_value = self._make_indexer(docs)
+
+        result = bm25_query("topic0 topic1 topic2 topic3 topic4", top_k=3)
+        assert len(result["sources"]) <= 3
+
+    @patch("rag.bm25.get_bm25_indexer")
+    def test_uninitialized_auto_initializes(self, mock_get):
+        """If indexer is not initialized, bm25_query calls initialize()."""
+        from rag.bm25 import BM25Indexer
+
+        indexer = BM25Indexer()
+        # initialize() sets _initialized=True so search() won't call it again
+        indexer.initialize = MagicMock(side_effect=lambda: setattr(indexer, '_initialized', True))
+        indexer._initialized = False
+        mock_get.return_value = indexer
+
+        from rag.bm25 import bm25_query
+
+        result = bm25_query("test")
+        indexer.initialize.assert_called_once()
+        assert result["num_sources"] == 0
+
+
+# ── enhanced_rag_query ────────────────────────────────────
+
+
+class TestEnhancedRagQuery:
+    """Tests for rag.pipeline.enhanced_rag_query (main entry point)."""
+
+    @pytest.mark.asyncio
+    @patch("rag.pipeline.get_query_cache")
+    async def test_cache_hit_returns_cached_result(self, mock_cache_factory):
+        import json
+        from rag.pipeline import enhanced_rag_query
+
+        cached_data = {
+            "answer": "cached answer",
+            "sources": [{"name": "c.pdf", "score": 0.9}],
+            "num_sources": 1,
+            "search_type": "hybrid",
+        }
+        mock_cache = MagicMock()
+        mock_cache.get.return_value = json.dumps(cached_data)
+        mock_cache_factory.return_value = mock_cache
+
+        result = await enhanced_rag_query("test query", use_cache=True)
+        assert result["answer"] == "cached answer"
+        assert result["search_type"] == "hybrid"
+
+    @pytest.mark.asyncio
+    async def test_total_failure_returns_error_type(self):
+        """Both primary search and VectorStore fallback fail → error result."""
+        from rag.pipeline import enhanced_rag_query
+
+        with patch("rag.pipeline.get_query_cache") as mock_cf, \
+             patch("rag.pipeline.hybrid_search", new_callable=AsyncMock,
+                   side_effect=Exception("primary fail")), \
+             patch("services.vector_store_service.VectorStore",
+                   side_effect=Exception("fallback fail")):
+            mock_cache = MagicMock()
+            mock_cache.get.return_value = None
+            mock_cf.return_value = mock_cache
+
+            result = await enhanced_rag_query("broken query", use_cache=True)
+
+        assert result["search_type"] == "error"
+        assert result["num_sources"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cache_disabled_skips_lookup(self):
+        """use_cache=False skips cache entirely."""
+        from rag.pipeline import enhanced_rag_query
+
+        search_result = {
+            "answer": "live answer",
+            "sources": [],
+            "num_sources": 0,
+            "search_type": "hybrid",
+            "reranking_enabled": False,
+        }
+
+        with patch("rag.pipeline.hybrid_search", new_callable=AsyncMock,
+                   return_value=search_result), \
+             patch("rag.pipeline.rerank_documents", new_callable=AsyncMock,
+                   return_value=[]), \
+             patch("rag.pipeline.get_query_cache") as mock_cf:
+            result = await enhanced_rag_query(
+                "test", use_cache=False, use_reranker=False
+            )
+            mock_cf.assert_not_called()
+
+        assert result["answer"] == "live answer"
+
+
+# ── get_stats ─────────────────────────────────────────────
+
+
+class TestGetStats:
+    """Tests for rag.pipeline.get_stats."""
+
+    @patch("rag.pipeline.get_redis_query_cache")
+    @patch("rag.pipeline.get_vector_counts")
+    def test_successful_stats(self, mock_counts, mock_redis):
+        from rag.pipeline import get_stats
+
+        mock_counts.return_value = {"count": 500}
+        mock_redis.return_value = MagicMock(
+            get_stats=MagicMock(return_value={
+                "backend": "redis",
+                "redis_available": True,
+                "ttl": 3600,
+                "redis_keys": 42,
+            })
+        )
+
+        result = get_stats()
+        assert result["index"]["total_entities"] == 500
+        assert result["cache"]["backend"] == "redis"
+        assert result["cache"]["cached_queries"] == 42
+
+    @patch("rag.pipeline.get_redis_query_cache")
+    @patch("rag.pipeline.get_vector_counts", side_effect=Exception("Milvus down"))
+    def test_milvus_failure_returns_zero(self, mock_counts, mock_redis):
+        from rag.pipeline import get_stats
+
+        mock_redis.return_value = MagicMock(
+            get_stats=MagicMock(return_value={
+                "backend": "memory",
+                "redis_available": False,
+            })
+        )
+
+        result = get_stats()
+        assert result["index"]["total_entities"] == 0
