@@ -244,6 +244,28 @@ Entry point: `from rag import enhanced_rag_query`
 - JSON-structured: `logger.info({"message": "...", "key": val})`
 - Import: `from logger import logger, log_request, log_response, log_error`
 
+## Docker Bind Mount & .venv — Isolation
+
+The backend uses `./backend:/app` bind mount. An anonymous volume `- /app/.venv` in `docker-compose.yml` **isolates** the container's `.venv` from the host's, preventing the root-ownership conflict.
+
+### How It Works
+- Host `.venv`: created by `uv sync` on host, owned by `htzl`, uses host Python (`/usr/bin/python3`)
+- Container `.venv`: lives in the anonymous volume, owned by root, uses container Python (`/usr/local/bin/python3`)
+- They never interfere with each other
+
+### Rules
+- **NEVER remove** the `- /app/.venv` line from `docker-compose.yml` volumes
+- Run `uv sync` on host to manage host `.venv` (for pytest, IDE, etc.)
+- Container manages its own `.venv` independently via Dockerfile
+- **NEVER `docker compose restart backend`** after code edits — uvicorn `--reload` handles it automatically
+
+### Recovery (if .venv gets corrupted)
+```bash
+docker run --rm -v $(pwd)/backend:/app python:3.12 rm -rf /app/.venv
+cd assets/backend && uv sync
+cd assets && docker compose up -d backend
+```
+
 ## Verification Checklist (after each task)
 - [ ] `curl http://localhost:8000/health` passes
 - [ ] `pytest ../tests/ -v` passes

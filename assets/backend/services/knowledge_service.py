@@ -329,7 +329,8 @@ def get_sources_with_vector_counts(
         }
 
     source_vectors = query_source_counts(sources)
-    total_vectors = stats.get("count", 0)
+    # Use sum of per-source counts (not col.num_entities which includes orphan vectors)
+    total_vectors = sum(source_vectors.values())
 
     return {
         "sources": sources,

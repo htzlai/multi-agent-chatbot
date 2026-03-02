@@ -9,6 +9,7 @@ export interface RawMessage {
 
 export interface ChatMetadata {
   name: string;
+  created_at?: string;
 }
 
 // SSE event types emitted by the backend
@@ -103,9 +104,7 @@ export function streamCompletion(
       });
 
       if (!res.ok || !res.body) {
-        callbacks.onError?.(
-          `Request failed: ${res.status} ${res.statusText}`,
-        );
+        callbacks.onError?.(`Request failed: ${res.status} ${res.statusText}`);
         callbacks.onDone();
         return;
       }

@@ -72,7 +72,13 @@ export function useChat() {
         chatIds.map(async (id) => {
           try {
             const meta = await getChatMetadata(id);
-            return { id, title: meta.name, updatedAt: new Date() };
+            return {
+              id,
+              title: meta.name,
+              updatedAt: meta.created_at
+                ? new Date(meta.created_at)
+                : new Date(),
+            };
           } catch {
             return {
               id,
