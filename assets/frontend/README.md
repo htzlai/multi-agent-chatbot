@@ -8,13 +8,12 @@ A modern React + TypeScript web application with shadcn/ui components.
 
 | Category | Technology |
 |----------|------------|
-| Build Tool | Vite |
+| Build Tool | Vite 7 |
 | Language | TypeScript |
 | Framework | React 19 |
 | UI Components | shadcn/ui |
 | Styling | Tailwind CSS |
 | Routing | React Router DOM |
-| Data Fetching | TanStack Query |
 | Animation | Framer Motion |
 | Icons | Lucide React |
 
@@ -27,11 +26,15 @@ frontend/
 ├── src/
 │   ├── components/
 │   │   ├── chat/          # Chat feature components
+│   │   ├── knowledge/     # Knowledge management components
 │   │   ├── landing/       # Landing page components
 │   │   ├── layout/        # Layout components (Navbar, Footer)
 │   │   └── ui/            # shadcn/ui components
 │   ├── hooks/             # Custom React hooks
-│   ├── lib/               # Utilities and mock data
+│   ├── lib/
+│   │   ├── api/           # Backend API client modules
+│   │   ├── api-client.ts  # Base fetch wrapper
+│   │   └── utils.ts       # Utility functions
 │   └── pages/             # Route pages
 ├── public/                # Static assets
 ├── package.json
@@ -61,7 +64,7 @@ pnpm build:prod
 
 | Command | Description |
 |---------|-------------|
-| `pnpm dev` | Start development server on port 8080 |
+| `pnpm dev` | Start development server |
 | `pnpm build` | Build for development |
 | `pnpm build:prod` | Build for production |
 | `pnpm lint` | Run ESLint |

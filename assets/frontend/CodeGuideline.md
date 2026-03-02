@@ -7,12 +7,17 @@ project-root/
   ├── public/                # Static assets (favicon, robots.txt, etc.)
   ├── src/
   │   ├── components/        # All reusable UI components
-  │   │   └── ui/            # Prebuilt and custom UI components, grouped by function
+  │   │   ├── chat/          # Chat feature components
+  │   │   ├── knowledge/     # Knowledge management components
+  │   │   ├── landing/       # Landing page sections
+  │   │   ├── layout/        # Layout components (Navbar, Footer)
+  │   │   └── ui/            # shadcn/ui base components
   │   ├── hooks/             # Custom React hooks
-  │   ├── lib/               # Utility functions and libraries
+  │   ├── lib/               # Utilities and API clients
+  │   │   └── api/           # Backend API modules (chats, models, sources, knowledge)
   │   ├── pages/             # Application pages (each page in its own subdirectory)
-  │   ├── App.tsx            # Main app component, sets up route providers
-  │   ├── router.tsx         # Router config, sets up routing
+  │   ├── App.tsx            # Main app component, sets up providers
+  │   ├── router.tsx         # Router config (createBrowserRouter)
   │   ├── main.tsx           # Entry point for the React app
   │   └── index.css          # Global styles
   ├── package.json           # Project metadata and scripts
@@ -23,15 +28,16 @@ project-root/
 ## Directory Responsibilities
 
 - **public/**: Static files served directly. Place images, icons, and robots.txt here.
-- **src/components/**: All UI components.  
-  - **ui/**: Contains atomic and composite UI components.  
-  - *Group related components into subdirectories if they share a domain or feature (e.g., `form/`, `charts/`).*
+- **src/components/**: All UI components.
+  - **ui/**: Contains atomic and composite UI components (shadcn/ui).
+  - *Group related components into subdirectories by feature domain (e.g., `chat/`, `knowledge/`, `landing/`).*
 - **src/hooks/**: Custom React hooks. Each file should export a single hook focused on one responsibility.
-- **src/lib/**: Utility functions and libraries that are not React components or hooks.
-- **src/pages/**: All route-level pages.  
-  - *Each page should have its own subdirectory if it contains more than a single file or has related logic/components.*
-- **src/App.tsx**: Sets up global providers.
-- **src/router.tsx**: Sets up routing.
+- **src/lib/**: Utility functions and API clients.
+  - **api/**: Backend API modules — one file per domain (chats, models, sources, knowledge).
+  - **api-client.ts**: Base fetch wrapper with error handling.
+- **src/pages/**: All route-level pages.
+  - *Each page should have its own subdirectory if it contains more than a single file.*
+- **src/router.tsx**: Sets up routing via `createBrowserRouter`.
 - **src/main.tsx**: Application entry point.
 
 **Important:**
@@ -45,14 +51,13 @@ Whenever a new module (such as a component, hook, or utility) or a new page is a
   - Example: For a "Dashboard" page, create `src/pages/dashboard/`.
 - **Place the main page component as `index.tsx` inside the subdirectory.**
 - **Add any page-specific components or logic in the same subdirectory.**
-- **Register the new route in `src/router.tsx and generate a semantic name.**
+- **Register the new route in `src/router.tsx`.**
   - Example:
     ```tsx
     import Dashboard from "./pages/dashboard";
-    // ...
+    // inside createBrowserRouter routes array:
     {
       path: "/dashboard",
-      name: 'dashboard',
       element: <Dashboard />
     }
     ```
@@ -73,40 +78,21 @@ Whenever a new module (such as a component, hook, or utility) or a new page is a
 ### 4. Adding Utilities
 
 - **Add utility functions to `src/lib/`.**
-- **Group related utilities in the same file or subdirectory if needed.**
+- **Add API client modules to `src/lib/api/` — one file per domain.**
 
 ## Coding Best Practices
 
-- **One module, one responsibility:**  
+- **One module, one responsibility:**
   Each file (component, hook, utility) should do one thing only.
-- **High cohesion, low coupling:**  
+- **High cohesion, low coupling:**
   Keep related logic together and avoid unnecessary dependencies between modules.
-- **Naming conventions:**  
+- **Naming conventions:**
   - Use `PascalCase` for components and page directories.
   - Use `camelCase` for hooks and utility functions.
   - Name page subdirectories and files after their route or feature.
-- **Component structure:**  
+- **Component structure:**
   - Keep components small and focused.
   - Extract subcomponents if a component grows too large.
-- **Page structure:**  
+- **Page structure:**
   - Place all logic, hooks, and components specific to a page in its subdirectory.
   - Only share code via `components/`, `hooks/`, or `lib/` if it is truly reusable.
-- **Documentation:**  
-  - Add comments for complex logic.
-  - Document the purpose of each module at the top of the file if not obvious.
-
-## Example: Adding a New "Profile" Page
-
-1. **Create a directory:**  
-   `src/pages/profile/`
-2. **Add the main page component:**  
-   `src/pages/profile/index.tsx`
-3. **Add page-specific components:**  
-   `src/pages/profile/ProfileHeader.tsx`, `src/pages/profile/ProfileDetails.tsx`
-4. **Register the route in `App.tsx`:**
-   ```tsx
-   import Profile from "./pages/profile";
-   // ...
-   <Route path="/profile" element={<Profile />} />
-   ```
-5. **If you need a reusable button, add it to `src/components/ui/button.tsx`.**
